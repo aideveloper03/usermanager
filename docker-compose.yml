@@ -1,0 +1,111 @@
+# =============================================================================
+# N8N Orchestration Gateway - Docker Compose (Development)
+# =============================================================================
+# This compose file is for local development and testing.
+# For production, use Kubernetes or a managed container service.
+
+version: '3.8'
+
+services:
+  # ---------------------------------------------------------------------------
+  # Gateway API
+  # ---------------------------------------------------------------------------
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "8000:8000"
+    environment:
+      # Application
+      - APP_NAME=N8N Orchestration Gateway
+      - ENVIRONMENT=development
+      - DEBUG=true
+      - LOG_LEVEL=DEBUG
+      - LOG_FORMAT=text
+      
+      # Supabase (use your project values)
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
+      - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
+      
+      # Clerk
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+      - CLERK_JWT_ISSUER=${CLERK_JWT_ISSUER}
+      - CLERK_JWKS_URL=${CLERK_JWKS_URL}
+      
+      # N8N
+      - N8N_BASE_URL=${N8N_BASE_URL:-http://n8n:5678}
+      - N8N_INTERNAL_AUTH_SECRET=${N8N_INTERNAL_AUTH_SECRET:-development-secret-change-in-production-minimum-64-chars}
+      - N8N_REQUEST_TIMEOUT=300
+      
+      # Redis
+      - REDIS_URL=redis://redis:6379/0
+      - ENABLE_RATE_LIMITING=true
+      
+      # Security
+      - ENABLE_HMAC_VALIDATION=true
+      - ENABLE_FINGERPRINTING=true
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+    depends_on:
+      - redis
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - gateway-network
+
+  # ---------------------------------------------------------------------------
+  # Redis (for rate limiting)
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    networks:
+      - gateway-network
+
+  # ---------------------------------------------------------------------------
+  # n8n (for local testing)
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_BASIC_AUTH_ACTIVE=false
+      - N8N_HOST=n8n
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://n8n:5678/
+      - GENERIC_TIMEZONE=UTC
+    volumes:
+      - n8n-data:/home/node/.n8n
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - gateway-network
+
+networks:
+  gateway-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  n8n-data:
