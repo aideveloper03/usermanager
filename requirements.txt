@@ -1,0 +1,12 @@
+asyncer
+bleach
+clerk-backend-api
+fastapi
+httpx
+pydantic
+pydantic-settings
+redis
+slowapi
+supabase
+uvicorn
+pytest
