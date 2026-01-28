@@ -293,8 +293,18 @@ async def execute_workflow(
         # Step 5: Update usage log to running status
         await db.update_usage_status(usage_log_id, ExecutionStatus.RUNNING)
         
-        # Step 6: Retrieve tenant credentials from Vault
-        tenant_credentials = await db.get_tenant_credentials(org_id)
+        # Step 6: Retrieve tenant credentials (with advisory lock if using dynamic injection)
+        use_dynamic = settings.n8n_use_dynamic_credentials and settings.n8n_api_key
+        
+        if use_dynamic:
+            # Get credentials with advisory lock to prevent credential bleed
+            cred_data = await db.get_credentials_with_lock(org_id)
+            tenant_credentials = cred_data.get("credentials") if cred_data else None
+            credential_mappings = cred_data.get("credential_mappings") if cred_data else None
+        else:
+            # Simple mode - just get credentials for payload injection
+            tenant_credentials = await db.get_tenant_credentials(org_id)
+            credential_mappings = None
         
         # Step 7: Execute n8n webhook
         try:
@@ -302,8 +312,10 @@ async def execute_workflow(
                 webhook_path=workflow["n8n_webhook_path"],
                 data=execute_request.data,
                 tenant_credentials=tenant_credentials,
+                credential_mappings=credential_mappings,
                 timeout=timeout,
-                execution_id=usage_log_id
+                execution_id=usage_log_id,
+                use_dynamic_injection=use_dynamic
             )
             
             execution_time_ms = n8n_response.get("execution_time_ms", 0)

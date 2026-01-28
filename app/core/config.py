@@ -12,6 +12,21 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def parse_comma_separated(value: str | None) -> list[str]:
+    """
+    Parse a comma-separated string into a list.
+    
+    Args:
+        value: Comma-separated string or None
+        
+    Returns:
+        List of trimmed, non-empty strings
+    """
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
@@ -108,11 +123,19 @@ class Settings(BaseSettings):
         min_length=32,
         description="High-entropy secret for authenticating requests to n8n"
     )
+    n8n_api_key: str | None = Field(
+        default=None,
+        description="n8n API key for REST API access (enables dynamic credential injection)"
+    )
     n8n_request_timeout: int = Field(
         default=300,
         ge=10,
         le=600,
         description="Request timeout for n8n calls in seconds"
+    )
+    n8n_use_dynamic_credentials: bool = Field(
+        default=False,
+        description="Enable dynamic credential injection via n8n REST API"
     )
     
     # =========================================================================
@@ -154,13 +177,31 @@ class Settings(BaseSettings):
         le=600,
         description="HMAC timestamp tolerance in seconds"
     )
-    cors_origins: list[str] = Field(
-        default_factory=list,
-        description="Allowed CORS origins"
+    # Store as string to avoid pydantic-settings JSON parsing issues
+    # Use cors_origins_list property to get as list
+    cors_origins: str = Field(
+        default="",
+        description="Allowed CORS origins (comma-separated)"
     )
-    trusted_proxies: list[str] = Field(
-        default_factory=list,
-        description="Trusted proxy IP addresses"
+    trusted_proxies: str = Field(
+        default="",
+        description="Trusted proxy IP addresses (comma-separated)"
+    )
+    
+    # =========================================================================
+    # Developer/Testing Settings
+    # =========================================================================
+    dev_skip_auth: bool = Field(
+        default=False,
+        description="Skip authentication in development (NEVER enable in production)"
+    )
+    dev_default_user_id: str = Field(
+        default="dev_user_001",
+        description="Default user ID when DEV_SKIP_AUTH is enabled"
+    )
+    dev_default_org_id: str = Field(
+        default="dev_org_001",
+        description="Default organization ID when DEV_SKIP_AUTH is enabled"
     )
     
     # =========================================================================
@@ -199,26 +240,6 @@ class Settings(BaseSettings):
     # Validators
     # =========================================================================
     
-    @field_validator("cors_origins", mode="before")
-    @classmethod
-    def parse_cors_origins(cls, v: Any) -> list[str]:
-        """Parse CORS origins from comma-separated string or list."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        if isinstance(v, list):
-            return v
-        return []
-    
-    @field_validator("trusted_proxies", mode="before")
-    @classmethod
-    def parse_trusted_proxies(cls, v: Any) -> list[str]:
-        """Parse trusted proxies from comma-separated string or list."""
-        if isinstance(v, str):
-            return [ip.strip() for ip in v.split(",") if ip.strip()]
-        if isinstance(v, list):
-            return v
-        return []
-    
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:
@@ -245,6 +266,8 @@ class Settings(BaseSettings):
         if self.environment == "production":
             if self.debug:
                 raise ValueError("Debug mode must be disabled in production")
+            if self.dev_skip_auth:
+                raise ValueError("DEV_SKIP_AUTH must be disabled in production")
             if len(self.n8n_internal_auth_secret) < 64:
                 raise ValueError(
                     "N8N internal auth secret should be at least 64 characters in production"
@@ -264,6 +287,16 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Check if running in production mode."""
         return self.environment == "production"
+    
+    @property
+    def cors_origins_list(self) -> list[str]:
+        """Get CORS origins as a list."""
+        return parse_comma_separated(self.cors_origins)
+    
+    @property
+    def trusted_proxies_list(self) -> list[str]:
+        """Get trusted proxies as a list."""
+        return parse_comma_separated(self.trusted_proxies)
     
     @property
     def supabase_headers(self) -> dict[str, str]:

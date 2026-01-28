@@ -179,10 +179,10 @@ Default rate limit: {rate_limit} requests per {period} seconds per tenant.
     )
     
     # Configure CORS
-    if settings.cors_origins:
+    if settings.cors_origins_list:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=settings.cors_origins,
+            allow_origins=settings.cors_origins_list,
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
