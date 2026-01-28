@@ -1,14 +1,48 @@
 # =============================================================================
-# N8N Orchestration Gateway - Docker Compose (Development)
+# N8N Orchestration Gateway - Docker Compose (Development & Production)
 # =============================================================================
-# This compose file is for local development and testing.
-# For production, use Kubernetes or a managed container service.
+# This compose file supports both local development and production deployment.
+# 
+# Usage:
+#   Development: docker compose up -d
+#   Production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 version: '3.8'
 
 services:
   # ---------------------------------------------------------------------------
-  # Gateway API
+  # Frontend UI (Next.js with Clerk)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+        - NEXT_PUBLIC_GATEWAY_URL=http://gateway:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
+      - NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+      - NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
+    depends_on:
+      - gateway
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------------------
+  # Gateway API (FastAPI)
   # ---------------------------------------------------------------------------
   gateway:
     build:
@@ -20,9 +54,9 @@ services:
     environment:
       # Application
       - APP_NAME=N8N Orchestration Gateway
-      - ENVIRONMENT=development
-      - DEBUG=true
-      - LOG_LEVEL=DEBUG
+      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - DEBUG=${DEBUG:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
       - LOG_FORMAT=text
       
       # Supabase (use your project values)
@@ -39,16 +73,21 @@ services:
       # N8N
       - N8N_BASE_URL=${N8N_BASE_URL:-http://n8n:5678}
       - N8N_INTERNAL_AUTH_SECRET=${N8N_INTERNAL_AUTH_SECRET:-development-secret-change-in-production-minimum-64-chars}
+      - N8N_API_KEY=${N8N_API_KEY:-}
       - N8N_REQUEST_TIMEOUT=300
+      - N8N_USE_DYNAMIC_CREDENTIALS=${N8N_USE_DYNAMIC_CREDENTIALS:-false}
       
       # Redis
       - REDIS_URL=redis://redis:6379/0
       - ENABLE_RATE_LIMITING=true
       
       # Security
-      - ENABLE_HMAC_VALIDATION=true
+      - ENABLE_HMAC_VALIDATION=${ENABLE_HMAC_VALIDATION:-true}
       - ENABLE_FINGERPRINTING=true
-      - CORS_ORIGINS=http://localhost:3000,http://localhost:8080
+      - CORS_ORIGINS=http://localhost:3000,http://frontend:3000,http://localhost:8080
+      
+      # Developer Mode (disable in production!)
+      - DEV_SKIP_AUTH=${DEV_SKIP_AUTH:-false}
     depends_on:
       - redis
     healthcheck:

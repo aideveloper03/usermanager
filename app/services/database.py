@@ -535,6 +535,7 @@ class DatabaseService:
         Args:
             org_id: Organization UUID
             credentials: Credentials to store (encrypted at rest)
+                Format: {"service_type": {"api_key": "...", ...}, ...}
             
         Returns:
             Secret ID or None on failure
@@ -547,6 +548,12 @@ class DatabaseService:
                     "p_credentials": credentials
                 }
             ).execute()
+            
+            logger.info(
+                "credentials_stored",
+                org_id=str(org_id),
+                services=list(credentials.keys()) if credentials else []
+            )
             
             return response.data if response.data else None
         except Exception as e:
@@ -565,7 +572,8 @@ class DatabaseService:
             org_id: Organization UUID
             
         Returns:
-            Decrypted credentials or None
+            Decrypted credentials dict by service type, or None
+            Format: {"openai": {"api_key": "sk-..."}, "slack": {...}, ...}
         """
         try:
             response = self.client.rpc(
@@ -577,6 +585,67 @@ class DatabaseService:
         except Exception as e:
             logger.error(
                 "get_credentials_error",
+                org_id=str(org_id),
+                error=str(e)
+            )
+            raise
+    
+    async def get_credentials_with_lock(
+        self,
+        org_id: UUID,
+        service_types: list[str] | None = None
+    ) -> dict[str, Any] | None:
+        """
+        Retrieve tenant credentials with an advisory lock held.
+        
+        This method acquires a transaction-level advisory lock to prevent
+        credential bleed between concurrent requests for the same tenant.
+        The lock is released when the database transaction commits or rolls back.
+        
+        Args:
+            org_id: Organization UUID
+            service_types: Optional list of service types to retrieve
+                If None, returns all credentials for the tenant
+            
+        Returns:
+            Dict containing:
+                - credentials: The decrypted credentials by service type
+                - credential_mappings: Mapping of service types to n8n credential IDs
+            
+        Raises:
+            Exception if lock cannot be acquired (timeout)
+        """
+        try:
+            response = self.client.rpc(
+                "fn_get_credentials_with_lock",
+                {
+                    "p_org_id": str(org_id),
+                    "p_service_types": service_types
+                }
+            ).execute()
+            
+            if not response.data:
+                return None
+            
+            # Parse the response into a structured format
+            credentials = {}
+            mappings = {}
+            
+            for row in response.data:
+                service_type = row.get("service_type")
+                if service_type:
+                    if row.get("credentials"):
+                        credentials[service_type] = row["credentials"]
+                    if row.get("n8n_credential_id"):
+                        mappings[service_type] = row["n8n_credential_id"]
+            
+            return {
+                "credentials": credentials,
+                "credential_mappings": mappings
+            }
+        except Exception as e:
+            logger.error(
+                "get_credentials_with_lock_error",
                 org_id=str(org_id),
                 error=str(e)
             )
@@ -595,6 +664,87 @@ class DatabaseService:
             logger.error(
                 "delete_credentials_error",
                 org_id=str(org_id),
+                error=str(e)
+            )
+            raise
+    
+    # =========================================================================
+    # N8N BASE CREDENTIALS OPERATIONS
+    # =========================================================================
+    
+    async def get_n8n_base_credentials(
+        self,
+        service_types: list[str] | None = None
+    ) -> dict[str, str]:
+        """
+        Get the mapping of service types to n8n base credential IDs.
+        
+        Args:
+            service_types: Optional list of service types to filter
+            
+        Returns:
+            Dict mapping service types to n8n credential IDs
+            e.g., {"openai": "cred_123", "slack": "cred_456"}
+        """
+        try:
+            query = self.client.table("n8n_base_credentials").select(
+                "service_type, n8n_credential_id"
+            ).eq("is_active", True)
+            
+            if service_types:
+                query = query.in_("service_type", service_types)
+            
+            response = query.execute()
+            
+            return {
+                row["service_type"]: row["n8n_credential_id"]
+                for row in response.data
+            } if response.data else {}
+        except Exception as e:
+            logger.error("get_n8n_base_credentials_error", error=str(e))
+            raise
+    
+    async def upsert_n8n_base_credential(
+        self,
+        service_type: str,
+        n8n_credential_id: str,
+        description: str | None = None
+    ) -> dict[str, Any]:
+        """
+        Create or update an n8n base credential mapping.
+        
+        Args:
+            service_type: The service type (e.g., 'openai', 'slack')
+            n8n_credential_id: The credential ID in n8n
+            description: Optional description
+            
+        Returns:
+            The created/updated record
+        """
+        try:
+            data = {
+                "service_type": service_type,
+                "n8n_credential_id": n8n_credential_id,
+                "description": description,
+                "is_active": True
+            }
+            
+            response = self.client.table("n8n_base_credentials").upsert(
+                data,
+                on_conflict="service_type"
+            ).execute()
+            
+            logger.info(
+                "n8n_base_credential_upserted",
+                service_type=service_type,
+                n8n_credential_id=n8n_credential_id
+            )
+            
+            return response.data[0] if response.data else {}
+        except Exception as e:
+            logger.error(
+                "upsert_n8n_base_credential_error",
+                service_type=service_type,
                 error=str(e)
             )
             raise

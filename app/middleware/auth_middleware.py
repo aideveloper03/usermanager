@@ -3,9 +3,17 @@ Authentication and Security Middleware.
 
 This module provides:
 - JWT authentication middleware
+- Developer bypass mode for testing
 - HMAC anti-hijacking validation
 - IP fingerprinting and anomaly detection
 - Request logging and security event tracking
+
+Developer Bypass Mode:
+    When DEV_SKIP_AUTH=true is set in environment variables, the API will accept
+    X-Dev-User-ID and X-Dev-Org-ID headers to mock authentication. This is useful
+    for local development and testing without valid Clerk tokens.
+    
+    NEVER enable this in production!
 """
 
 import time
@@ -33,6 +41,73 @@ from app.core.security import (
 from app.models.schemas import SecurityEventType
 
 logger = structlog.get_logger(__name__)
+
+
+# =============================================================================
+# DEVELOPER BYPASS MODE
+# =============================================================================
+
+
+class DevBypassAuth:
+    """
+    Developer authentication bypass for testing.
+    
+    When DEV_SKIP_AUTH=true, this class provides mock authentication
+    using X-Dev-User-ID and X-Dev-Org-ID headers.
+    
+    SECURITY WARNING: Never enable in production!
+    """
+    
+    # Header names for dev bypass
+    DEV_USER_ID_HEADER = "X-Dev-User-ID"
+    DEV_ORG_ID_HEADER = "X-Dev-Org-ID"
+    DEV_ROLE_HEADER = "X-Dev-Role"
+    
+    @classmethod
+    def is_enabled(cls) -> bool:
+        """Check if developer bypass mode is enabled."""
+        return settings.dev_skip_auth and settings.environment != "production"
+    
+    @classmethod
+    def get_mock_user_id(cls, request: Request) -> str:
+        """Get the mock user ID from header or default."""
+        return request.headers.get(
+            cls.DEV_USER_ID_HEADER, 
+            settings.dev_default_user_id
+        )
+    
+    @classmethod
+    def get_mock_org_id(cls, request: Request) -> str | None:
+        """Get the mock organization ID from header or default."""
+        return request.headers.get(
+            cls.DEV_ORG_ID_HEADER,
+            settings.dev_default_org_id
+        )
+    
+    @classmethod
+    def get_mock_role(cls, request: Request) -> str:
+        """Get the mock user role from header."""
+        return request.headers.get(cls.DEV_ROLE_HEADER, "admin")
+    
+    @classmethod
+    def get_mock_claims(cls, request: Request) -> dict[str, Any]:
+        """Generate mock JWT claims for testing."""
+        user_id = cls.get_mock_user_id(request)
+        org_id = cls.get_mock_org_id(request)
+        role = cls.get_mock_role(request)
+        
+        return {
+            "sub": user_id,
+            "org_id": org_id,
+            "org_role": role,
+            "email": f"{user_id}@dev.local",
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+            "dev_bypass": True,  # Flag indicating this is a mock
+        }
+
+
+dev_bypass = DevBypassAuth()
 
 
 # =============================================================================
@@ -73,7 +148,7 @@ def get_client_ip(request: Request) -> str:
         ips = [ip.strip() for ip in forwarded_for.split(",")]
         # Filter out trusted proxies
         for ip in ips:
-            if ip not in settings.trusted_proxies:
+            if ip not in settings.trusted_proxies_list:
                 return ip
     
     # Check for X-Real-IP header
@@ -186,9 +261,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
     
     This middleware:
     1. Generates a request ID for tracing
-    2. Validates JWT tokens from Authorization header
-    3. Alternatively validates API keys from X-API-Key header
-    4. Stores authenticated user/org info in request.state
+    2. Checks for developer bypass mode (DEV_SKIP_AUTH)
+    3. Validates JWT tokens from Authorization header
+    4. Alternatively validates API keys from X-API-Key header
+    5. Stores authenticated user/org info in request.state
     """
     
     def __init__(self, app: ASGIApp):
@@ -211,6 +287,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_public_path(request.url.path):
             return await call_next(request)
         
+        # Check for developer bypass mode
+        if DevBypassAuth.is_enabled():
+            return await self._authenticate_dev_bypass(request, call_next)
+        
         # Try JWT authentication first
         auth_header = request.headers.get("Authorization")
         api_key = request.headers.get("X-API-Key")
@@ -224,6 +304,36 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 "Missing authentication. Provide Authorization Bearer token or X-API-Key header.",
                 request_id
             )
+    
+    async def _authenticate_dev_bypass(
+        self,
+        request: Request,
+        call_next: Callable[[Request], Any]
+    ) -> Response:
+        """
+        Authenticate using developer bypass mode.
+        
+        Uses X-Dev-User-ID and X-Dev-Org-ID headers for mock authentication.
+        """
+        mock_claims = DevBypassAuth.get_mock_claims(request)
+        user_id = mock_claims["sub"]
+        org_id = mock_claims.get("org_id")
+        
+        # Store in request state
+        request.state.user_id = user_id
+        request.state.org_id = org_id
+        request.state.jwt_claims = mock_claims
+        request.state.auth_method = "dev_bypass"
+        
+        logger.warning(
+            "dev_bypass_authenticated",
+            user_id=user_id,
+            org_id=org_id,
+            request_id=request.state.request_id,
+            message="Developer bypass mode is active - DO NOT USE IN PRODUCTION"
+        )
+        
+        return await call_next(request)
     
     async def _authenticate_jwt(
         self,
