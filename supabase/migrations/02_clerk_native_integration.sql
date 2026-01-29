@@ -570,7 +570,7 @@ CREATE OR REPLACE FUNCTION fn_sync_clerk_user(
     p_username TEXT DEFAULT NULL,
     p_avatar_url TEXT DEFAULT NULL,
     p_metadata JSONB DEFAULT '{}'::JSONB
-) RETURNS UUID
+) RETURNS TEXT
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
@@ -604,7 +604,8 @@ BEGIN
         updated_at = NOW()
     RETURNING id INTO v_profile_id;
     
-    RETURN v_profile_id::UUID;
+    -- Return the TEXT profile ID (Clerk user IDs are strings like 'user_xxxx')
+    RETURN v_profile_id;
 END;
 $$;
 

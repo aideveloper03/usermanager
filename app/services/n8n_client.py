@@ -18,7 +18,6 @@ Credential Injection Pattern:
     4. After execution, credentials can be reset or left for the next request
 """
 
-import asyncio
 import time
 from typing import Any, AsyncIterator
 from uuid import UUID
@@ -189,10 +188,15 @@ class CredentialInjector:
         results = {}
         
         for service_type, n8n_cred_id in credential_mappings.items():
-            if service_type not in tenant_credentials:
+            # Get credential data with explicit null check
+            cred_data = tenant_credentials.get(service_type)
+            
+            if not cred_data:
                 logger.warning(
-                    "missing_tenant_credential",
-                    service_type=service_type
+                    "missing_or_empty_tenant_credential",
+                    service_type=service_type,
+                    is_missing=service_type not in tenant_credentials,
+                    is_empty=cred_data is not None and not cred_data
                 )
                 results[service_type] = False
                 continue
@@ -200,7 +204,7 @@ class CredentialInjector:
             try:
                 success = await self.update_credential(
                     credential_id=n8n_cred_id,
-                    credential_data=tenant_credentials[service_type],
+                    credential_data=cred_data,
                     credential_type=service_type
                 )
                 results[service_type] = success

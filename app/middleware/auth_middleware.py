@@ -65,8 +65,16 @@ class DevBypassAuth:
     
     @classmethod
     def is_enabled(cls) -> bool:
-        """Check if developer bypass mode is enabled."""
-        return settings.dev_skip_auth and settings.environment != "production"
+        """
+        Check if developer bypass mode is enabled.
+        
+        Requires BOTH dev_skip_auth=true AND environment=development
+        to prevent accidental enablement in staging/production-like environments.
+        """
+        return (
+            settings.dev_skip_auth 
+            and settings.environment == "development"
+        )
     
     @classmethod
     def get_mock_user_id(cls, request: Request) -> str:
