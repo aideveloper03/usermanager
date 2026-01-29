@@ -45,6 +45,7 @@ interface Organization {
 }
 
 export default function DashboardPage() {
+  // Auth is guaranteed by layout - user is always authenticated here
   const { user, isLoaded: userLoaded } = useUser();
   const { getToken } = useAuth();
   

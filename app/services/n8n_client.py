@@ -19,6 +19,7 @@ Credential Injection Pattern:
 """
 
 import time
+from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 from uuid import UUID
 
@@ -219,6 +220,51 @@ class CredentialInjector:
         return results
 
 
+class CredentialOperationContext:
+    """
+    Context manager for credential operations with automatic lock release.
+    
+    Usage:
+        async with CredentialOperationContext(db, org_id) as op:
+            if op.acquired:
+                # Perform credential operations
+                await inject_credentials(...)
+    """
+    
+    def __init__(
+        self,
+        db_service: Any,
+        org_id: UUID,
+        operation_type: str = "injection",
+        timeout_seconds: int = 30,
+        worker_id: str | None = None
+    ):
+        self.db_service = db_service
+        self.org_id = org_id
+        self.operation_type = operation_type
+        self.timeout_seconds = timeout_seconds
+        self.worker_id = worker_id
+        self.operation_id: str | None = None
+        self.acquired: bool = False
+    
+    async def __aenter__(self) -> "CredentialOperationContext":
+        """Acquire the credential operation lock."""
+        self.operation_id = await self.db_service.acquire_credential_operation(
+            org_id=self.org_id,
+            operation_type=self.operation_type,
+            timeout_seconds=self.timeout_seconds,
+            worker_id=self.worker_id
+        )
+        self.acquired = self.operation_id is not None
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Release the credential operation lock."""
+        if self.operation_id:
+            await self.db_service.release_credential_operation(self.operation_id)
+        return False  # Don't suppress exceptions
+
+
 class N8NClient:
     """
     Async HTTP client for n8n webhook execution.
@@ -266,6 +312,31 @@ class N8NClient:
         self.credential_injector = (
             CredentialInjector(base_url, api_key) if api_key else None
         )
+    
+    @asynccontextmanager
+    async def credential_operation(
+        self,
+        db_service: Any,
+        org_id: UUID,
+        operation_type: str = "injection"
+    ) -> AsyncIterator[CredentialOperationContext]:
+        """
+        Context manager for credential operations with database locking.
+        
+        Usage:
+            async with client.credential_operation(db, org_id) as op:
+                if op.acquired:
+                    await client.credential_injector.inject_credentials(...)
+        """
+        ctx = CredentialOperationContext(
+            db_service=db_service,
+            org_id=org_id,
+            operation_type=operation_type,
+            timeout_seconds=self.default_timeout,
+            worker_id=f"n8n-client-{id(self)}"
+        )
+        async with ctx:
+            yield ctx
     
     def _get_webhook_url(self, webhook_path: str) -> str:
         """

@@ -651,6 +651,90 @@ class DatabaseService:
             )
             raise
     
+    # =========================================================================
+    # IMPROVED CREDENTIAL OPERATIONS (V2)
+    # =========================================================================
+    
+    async def acquire_credential_operation(
+        self,
+        org_id: UUID,
+        operation_type: str = "injection",
+        timeout_seconds: int = 30,
+        worker_id: str | None = None
+    ) -> str | None:
+        """
+        Acquire a credential operation lock for the organization.
+        
+        Uses the improved locking mechanism that provides better visibility
+        and cleanup of stale operations.
+        
+        Args:
+            org_id: Organization UUID
+            operation_type: Type of operation (e.g., 'injection', 'update')
+            timeout_seconds: How long the operation lock is valid
+            worker_id: Optional identifier for the worker acquiring the lock
+            
+        Returns:
+            Operation ID string if acquired, None if failed
+        """
+        try:
+            response = self.client.rpc(
+                "fn_acquire_credential_operation",
+                {
+                    "p_org_id": str(org_id),
+                    "p_operation_type": operation_type,
+                    "p_timeout_seconds": timeout_seconds,
+                    "p_worker_id": worker_id
+                }
+            ).execute()
+            
+            if response.data:
+                logger.info(
+                    "credential_operation_acquired",
+                    org_id=str(org_id),
+                    operation_type=operation_type,
+                    operation_id=response.data
+                )
+                return response.data
+            return None
+        except Exception as e:
+            logger.warning(
+                "credential_operation_acquire_failed",
+                org_id=str(org_id),
+                operation_type=operation_type,
+                error=str(e)
+            )
+            return None
+    
+    async def release_credential_operation(self, operation_id: str) -> bool:
+        """
+        Release a credential operation lock.
+        
+        Args:
+            operation_id: The operation ID returned from acquire_credential_operation
+            
+        Returns:
+            True if released successfully, False otherwise
+        """
+        try:
+            response = self.client.rpc(
+                "fn_release_credential_operation",
+                {"p_operation_id": operation_id}
+            ).execute()
+            
+            logger.debug(
+                "credential_operation_released",
+                operation_id=operation_id
+            )
+            return bool(response.data)
+        except Exception as e:
+            logger.error(
+                "credential_operation_release_error",
+                operation_id=operation_id,
+                error=str(e)
+            )
+            return False
+    
     async def delete_tenant_credentials(self, org_id: UUID) -> bool:
         """Delete tenant credentials from Vault."""
         try:
