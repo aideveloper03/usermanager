@@ -69,7 +69,7 @@ os.environ.update({
 
 # Now import the app after environment is set
 from app.main import app
-from app.services.database import DatabaseService
+from app.services.database import DatabaseService, reset_db_service
 from app.services.n8n_client import N8NClient, reset_n8n_client
 from app.middleware.auth_middleware import DevBypassAuth
 
@@ -472,6 +472,7 @@ def reset_singletons():
     """
     yield
     reset_n8n_client()
+    reset_db_service()
 
 
 # =============================================================================
