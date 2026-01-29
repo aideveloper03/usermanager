@@ -5,32 +5,37 @@ Complete API documentation for the N8N Orchestration Gateway.
 ## Base URL
 
 ```
-Production: https://api.your-domain.com/api/v1
-Development: http://localhost:8000/api/v1
+Production: https://your-gateway.example.com
+Development: http://localhost:8000
 ```
 
 ## Authentication
 
-### JWT Authentication (Recommended)
+### Clerk JWT Authentication
 
-Include Clerk JWT token in the Authorization header:
+Include the JWT token in the Authorization header:
 
 ```http
-Authorization: Bearer eyJhbGciOiJSUzI1NiIs...
+Authorization: Bearer <clerk-jwt-token>
 ```
+
+The JWT must include:
+- `sub`: Clerk user ID
+- `org_id`: Organization ID (optional, can use X-Tenant-ID header instead)
+- `exp`: Expiration timestamp
 
 ### API Key Authentication
 
-Include API key and HMAC signature:
+For server-to-server communication:
 
 ```http
-X-API-Key: gw_live_xxxxxxxxxxxxx
+X-API-Key: gw_live_xxxxxxxxxxxx
 X-Tenant-ID: your-tenant-id
 X-Timestamp: 1700000000
-X-Signature: hmac-sha256-signature
+X-Signature: <hmac-sha256-signature>
 ```
 
-**Signature Computation:**
+**Computing the HMAC Signature:**
 
 ```python
 import hmac
@@ -38,106 +43,103 @@ import hashlib
 import time
 import json
 
+def compute_signature(client_secret: str, timestamp: str, body: bytes) -> str:
+    message = timestamp.encode() + body
+    return hmac.new(
+        client_secret.encode(),
+        message,
+        hashlib.sha256
+    ).hexdigest()
+
+# Example usage
 timestamp = str(int(time.time()))
-body = json.dumps(request_body)
-message = timestamp + body
-signature = hmac.new(
-    client_secret.encode(),
-    message.encode(),
-    hashlib.sha256
-).hexdigest()
+body = json.dumps({"workflow_id": "xxx", "data": {}}).encode()
+signature = compute_signature("your-client-secret", timestamp, body)
 ```
 
-## Response Format
+### Developer Bypass (Development Only)
 
-### Success Response
+When `DEV_SKIP_AUTH=true`:
 
-```json
-{
-  "success": true,
-  "data": { ... },
-  "request_id": "uuid"
-}
+```http
+X-Dev-User-ID: test_user_123
+X-Dev-Org-ID: test_org_123
+X-Dev-Role: admin
 ```
-
-### Error Response
-
-```json
-{
-  "error": "error_code",
-  "message": "Human-readable message",
-  "details": { ... },
-  "request_id": "uuid"
-}
-```
-
-## Rate Limiting
-
-Default: 100 requests per 60 seconds per tenant.
-
-Response headers:
-- `X-RateLimit-Limit`: Maximum requests
-- `X-RateLimit-Remaining`: Remaining requests
-- `X-RateLimit-Reset`: Seconds until reset
-- `Retry-After`: Seconds to wait (on 429)
 
 ---
 
 ## Endpoints
 
-### Execute Workflow
+### Health Check
 
-Execute an n8n workflow through the gateway.
+#### GET /api/v1/health
 
-```http
-POST /execute
-```
+Check gateway health status.
 
-**Headers:**
-
-| Header | Required | Description |
-|--------|----------|-------------|
-| `Authorization` | Yes* | Bearer token (JWT auth) |
-| `X-API-Key` | Yes* | API key (API key auth) |
-| `X-Tenant-ID` | Conditional | Required for API key auth |
-| `X-Timestamp` | Conditional | Required for API key auth |
-| `X-Signature` | Conditional | Required for API key auth |
-
-*One of JWT or API key is required
-
-**Request Body:**
-
+**Response:**
 ```json
 {
-  "workflow_id": "uuid",
-  "data": {
-    "your": "input data"
-  },
-  "callback_url": "https://optional-callback.com",
-  "timeout_override": 300,
-  "metadata": {
-    "source": "api"
+  "status": "healthy",
+  "version": "1.0.0",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "checks": {
+    "database": "ok",
+    "n8n": "ok",
+    "redis": "ok"
   }
 }
 ```
 
+---
+
+### Workflow Execution
+
+#### POST /api/v1/execute
+
+Execute an n8n workflow.
+
+**Request Headers:**
+```http
+Authorization: Bearer <token>
+Content-Type: application/json
+X-Tenant-ID: your-tenant-id (optional with JWT)
+```
+
+**Request Body:**
+```json
+{
+  "workflow_id": "550e8400-e29b-41d4-a716-446655440000",
+  "data": {
+    "input": "your input data",
+    "parameters": {
+      "key": "value"
+    }
+  },
+  "metadata": {
+    "source": "api",
+    "correlation_id": "abc-123"
+  },
+  "timeout_override": 120
+}
+```
+
+**Parameters:**
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `workflow_id` | UUID | Yes | Registered workflow UUID |
-| `data` | object | No | Input data for the workflow |
-| `callback_url` | URL | No | Webhook for async results |
-| `timeout_override` | integer | No | Custom timeout (10-600s) |
-| `metadata` | object | No | Additional tracking data |
+| `workflow_id` | UUID | Yes | ID of the workflow to execute |
+| `data` | object | Yes | Input data for the workflow |
+| `metadata` | object | No | Additional metadata for logging |
+| `timeout_override` | integer | No | Custom timeout in seconds (max: 600) |
 
-**Response (200 OK):**
-
+**Success Response (200):**
 ```json
 {
   "success": true,
-  "execution_id": "uuid",
+  "execution_id": "exec-uuid-12345",
   "status": "completed",
   "data": {
-    "workflow": "response"
+    "result": "workflow output"
   },
   "credits_used": 1,
   "credits_remaining": 999,
@@ -147,99 +149,75 @@ POST /execute
 
 **Error Responses:**
 
-| Status | Error Code | Description |
-|--------|------------|-------------|
-| 400 | bad_request | Invalid request body |
-| 401 | unauthorized | Authentication failed |
-| 402 | insufficient_credits | Not enough credits |
-| 403 | forbidden | HMAC validation failed |
-| 404 | not_found | Workflow not found |
-| 429 | rate_limit_exceeded | Too many requests |
-| 502 | n8n_error | n8n returned an error |
-| 504 | gateway_timeout | n8n request timed out |
-
----
-
-### Execute Workflow (Streaming)
-
-Execute workflow and stream the response.
-
-```http
-POST /execute/stream
-```
-
-Same request format as `/execute`. Response is streamed as chunks.
-
----
-
-## Organizations
-
-### Create Organization
-
-Create a new organization with API credentials.
-
-```http
-POST /organizations
-```
-
-**Request Body:**
-
+*402 Insufficient Credits:*
 ```json
 {
-  "name": "My Organization",
-  "tenant_id": "my-org-tenant",
-  "plan_type": "starter"
+  "error": "insufficient_credits",
+  "message": "Insufficient credits. Required: 1, Available: 0",
+  "credits_required": 1,
+  "credits_available": 0
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | Organization name |
-| `tenant_id` | string | Yes | Unique tenant ID (lowercase, alphanumeric, hyphens) |
-| `plan_type` | string | No | free, starter, professional, enterprise |
-
-**Response (201 Created):**
-
+*404 Workflow Not Found:*
 ```json
 {
-  "id": "uuid",
-  "name": "My Organization",
-  "tenant_id": "my-org-tenant",
-  "api_key_prefix": "gw_live_xxxx",
-  "api_key": "gw_live_full_key_only_shown_once",
-  "client_secret": "secret_only_shown_once",
-  "credits": 1000,
-  "plan_type": "starter",
-  "is_active": true,
-  "created_at": "2024-01-01T00:00:00Z"
+  "error": "not_found",
+  "message": "Workflow 550e8400-e29b-41d4-a716-446655440000 not found or inactive"
 }
 ```
 
-⚠️ **Important**: `api_key` and `client_secret` are only returned on creation.
+*504 Gateway Timeout:*
+```json
+{
+  "error": "gateway_timeout",
+  "message": "Request to n8n timed out after 300s",
+  "execution_id": "exec-uuid-12345"
+}
+```
 
 ---
 
-### List Organizations
+#### POST /api/v1/execute/stream
 
-Get all organizations for the authenticated user.
+Execute a workflow with streaming response.
 
+Same request format as `/api/v1/execute`, but returns a streaming response with chunks as they become available.
+
+**Response Headers:**
 ```http
-GET /organizations
+Content-Type: application/json
+X-Execution-ID: exec-uuid-12345
+X-Request-ID: req-uuid-67890
+Transfer-Encoding: chunked
 ```
 
-**Response (200 OK):**
+---
 
+### Workflows
+
+#### GET /api/v1/workflows
+
+List all workflows for the authenticated organization.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `active_only` | boolean | true | Only return active workflows |
+| `limit` | integer | 50 | Maximum results |
+| `offset` | integer | 0 | Pagination offset |
+
+**Response:**
 ```json
 [
   {
-    "id": "uuid",
-    "name": "My Organization",
-    "tenant_id": "my-org-tenant",
-    "api_key_prefix": "gw_live_xxxx",
-    "credits": 950,
-    "plan_type": "starter",
+    "id": "workflow-uuid-12345",
+    "name": "Process Customer Data",
+    "description": "Processes and validates customer data",
+    "n8n_workflow_id": "n8n-123",
     "is_active": true,
-    "role": "owner",
+    "credits_per_execution": 1,
+    "timeout_seconds": 300,
     "created_at": "2024-01-01T00:00:00Z"
   }
 ]
@@ -247,487 +225,278 @@ GET /organizations
 
 ---
 
-### Get Organization
+#### GET /api/v1/workflows/{workflow_id}
 
-Get organization details by ID.
+Get a specific workflow.
 
-```http
-GET /organizations/{org_id}
-```
-
-**Parameters:**
-
-| Name | In | Type | Required |
-|------|-----|------|----------|
-| `org_id` | path | UUID | Yes |
-
----
-
-### Update Organization
-
-Update organization settings.
-
-```http
-PATCH /organizations/{org_id}
-```
-
-**Request Body:**
-
+**Response:**
 ```json
 {
-  "name": "Updated Name",
+  "id": "workflow-uuid-12345",
+  "name": "Process Customer Data",
+  "description": "Processes and validates customer data",
+  "n8n_workflow_id": "n8n-123",
+  "n8n_webhook_path": "/webhook/process-customer",
+  "is_active": true,
+  "credits_per_execution": 1,
+  "timeout_seconds": 300,
   "settings": {
-    "webhook_url": "https://callback.com"
-  }
+    "retry_on_failure": false,
+    "max_retries": 3,
+    "input_schema": null,
+    "output_schema": null
+  },
+  "created_at": "2024-01-01T00:00:00Z",
+  "updated_at": "2024-01-15T10:30:00Z"
 }
 ```
 
 ---
 
-### Get Usage Logs
+#### POST /api/v1/workflows
 
-Get paginated usage logs for an organization.
+Create a new workflow (Admin only).
 
-```http
-GET /organizations/{org_id}/usage
-```
-
-**Query Parameters:**
-
-| Name | Type | Default | Description |
-|------|------|---------|-------------|
-| `page` | integer | 1 | Page number |
-| `page_size` | integer | 20 | Items per page (max 100) |
-
-**Response (200 OK):**
-
+**Request Body:**
 ```json
 {
-  "items": [
+  "name": "New Workflow",
+  "description": "Description of the workflow",
+  "n8n_workflow_id": "n8n-new-123",
+  "n8n_webhook_path": "/webhook/new-workflow",
+  "credits_per_execution": 2,
+  "timeout_seconds": 120
+}
+```
+
+**Response (201):**
+```json
+{
+  "id": "workflow-uuid-new",
+  "name": "New Workflow",
+  "created_at": "2024-01-15T10:30:00Z"
+}
+```
+
+---
+
+### Organizations
+
+#### GET /api/v1/organizations
+
+List organizations the user belongs to.
+
+**Response:**
+```json
+[
+  {
+    "id": "org-uuid-12345",
+    "name": "My Company",
+    "tenant_id": "my-company",
+    "credits": 1000,
+    "plan_type": "professional",
+    "role": "owner",
+    "is_active": true
+  }
+]
+```
+
+---
+
+#### GET /api/v1/organizations/{org_id}
+
+Get organization details.
+
+**Response:**
+```json
+{
+  "id": "org-uuid-12345",
+  "name": "My Company",
+  "tenant_id": "my-company",
+  "credits": 1000,
+  "plan_type": "professional",
+  "is_active": true,
+  "settings": {
+    "webhook_url": null,
+    "allowed_ips": [],
+    "rate_limit_override": null
+  },
+  "created_at": "2024-01-01T00:00:00Z"
+}
+```
+
+---
+
+#### POST /api/v1/organizations
+
+Create a new organization.
+
+**Request Body:**
+```json
+{
+  "name": "New Company",
+  "tenant_id": "new-company",
+  "plan_type": "starter"
+}
+```
+
+**Response (201):**
+```json
+{
+  "id": "org-uuid-new",
+  "name": "New Company",
+  "tenant_id": "new-company",
+  "api_key": "gw_live_xxxxxxxxxxxxx",
+  "client_secret": "secret_xxxxxxxxxxxxx",
+  "credits": 100,
+  "message": "Save these credentials securely - they won't be shown again!"
+}
+```
+
+---
+
+### Credits & Usage
+
+#### GET /api/v1/organizations/{org_id}/usage
+
+Get usage logs for an organization.
+
+**Query Parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | integer | 50 | Maximum results |
+| `offset` | integer | 0 | Pagination offset |
+| `status` | string | null | Filter by status |
+
+**Response:**
+```json
+{
+  "usage_logs": [
     {
-      "id": "uuid",
-      "workflow_id": "uuid",
+      "id": "usage-uuid-12345",
+      "workflow_id": "workflow-uuid-12345",
+      "workflow_name": "Process Customer Data",
       "credits_used": 1,
       "status": "completed",
       "execution_time_ms": 150,
-      "created_at": "2024-01-01T00:00:00Z",
-      "completed_at": "2024-01-01T00:00:01Z"
+      "created_at": "2024-01-15T10:30:00Z",
+      "completed_at": "2024-01-15T10:30:01Z"
     }
   ],
   "total": 100,
-  "page": 1,
-  "page_size": 20,
-  "total_pages": 5
+  "credits_remaining": 900
 }
 ```
 
 ---
 
-### Store Tenant Credentials
+#### POST /api/v1/organizations/{org_id}/credits
 
-Store encrypted credentials for workflow injection.
-
-```http
-POST /organizations/{org_id}/credentials
-```
+Add credits to an organization (Admin only).
 
 **Request Body:**
-
 ```json
 {
-  "linkedin_api_key": "your-key",
-  "openai_key": "sk-xxx",
-  "custom_service": {
-    "token": "abc",
-    "url": "https://api.example.com"
-  }
+  "amount": 1000,
+  "invoice_id": "inv-uuid-12345"
 }
 ```
 
-**Response (201 Created):**
-
+**Response:**
 ```json
 {
-  "message": "Credentials stored successfully"
+  "success": true,
+  "new_balance": 2000,
+  "amount_added": 1000
 }
 ```
 
 ---
 
-### Delete Tenant Credentials
+### Internal Callbacks
 
-Delete stored credentials.
+These endpoints are called by n8n workflows and use internal authentication.
 
-```http
-DELETE /organizations/{org_id}/credentials
-```
+#### POST /api/v1/internal/update-status
 
-**Response (204 No Content)**
-
----
-
-## Workflows
-
-### Create Workflow
-
-Register an n8n workflow with the gateway.
-
-```http
-POST /workflows?org_id={uuid}
-```
-
-**Query Parameters:**
-
-| Name | Type | Required |
-|------|------|----------|
-| `org_id` | UUID | Yes |
-
-**Request Body:**
-
-```json
-{
-  "name": "LinkedIn Summarizer",
-  "description": "Summarizes LinkedIn profiles",
-  "n8n_workflow_id": "wf_abc123",
-  "n8n_webhook_path": "/webhook/linkedin-summarizer",
-  "credits_per_execution": 2,
-  "timeout_seconds": 300,
-  "is_active": true,
-  "settings": {
-    "retry_on_failure": true,
-    "max_retries": 3
-  }
-}
-```
-
-| Field | Type | Required | Default | Description |
-|-------|------|----------|---------|-------------|
-| `name` | string | Yes | - | Workflow name |
-| `description` | string | No | null | Description |
-| `n8n_workflow_id` | string | Yes | - | n8n workflow ID |
-| `n8n_webhook_path` | string | Yes | - | Webhook path in n8n |
-| `credits_per_execution` | integer | No | 1 | Credits per run |
-| `timeout_seconds` | integer | No | 300 | Timeout (10-600s) |
-| `is_active` | boolean | No | true | Whether active |
-| `settings` | object | No | {} | Additional settings |
-
----
-
-### List Workflows
-
-Get all workflows for an organization.
-
-```http
-GET /workflows?org_id={uuid}&include_inactive=false
-```
-
-**Query Parameters:**
-
-| Name | Type | Default |
-|------|------|---------|
-| `org_id` | UUID | Required |
-| `include_inactive` | boolean | false |
-
----
-
-### Get Workflow
-
-Get workflow details.
-
-```http
-GET /workflows/{workflow_id}
-```
-
----
-
-### Update Workflow
-
-Update workflow configuration.
-
-```http
-PATCH /workflows/{workflow_id}
-```
-
-**Request Body:**
-
-```json
-{
-  "name": "Updated Name",
-  "credits_per_execution": 3,
-  "is_active": false
-}
-```
-
----
-
-### Activate Workflow
-
-Activate a workflow for execution.
-
-```http
-POST /workflows/{workflow_id}/activate
-```
-
----
-
-### Deactivate Workflow
-
-Deactivate a workflow.
-
-```http
-POST /workflows/{workflow_id}/deactivate
-```
-
----
-
-## Health
-
-### Basic Health Check
-
-```http
-GET /health
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "healthy",
-  "version": "1.0.0",
-  "environment": "production",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "checks": {}
-}
-```
-
----
-
-### Readiness Check
-
-Verifies all dependencies are available.
-
-```http
-GET /health/ready
-```
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "healthy",
-  "version": "1.0.0",
-  "environment": "production",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "checks": {
-    "supabase": true,
-    "n8n": true,
-    "redis": true
-  }
-}
-```
-
----
-
-### Liveness Check
-
-Kubernetes liveness probe.
-
-```http
-GET /health/live
-```
-
----
-
-## Internal Endpoints
-
-These endpoints are for n8n callbacks and require `X-N8N-Internal-Auth` header.
-
-### Log Error from n8n
-
-```http
-POST /internal/log-error
-```
+Update execution status from n8n.
 
 **Headers:**
-
 ```http
-X-N8N-Internal-Auth: your-internal-secret
+X-N8N-Internal-Auth: <internal-secret>
 ```
 
 **Request Body:**
-
 ```json
 {
-  "workflow_id": "n8n-workflow-id",
-  "execution_id": "n8n-execution-id",
-  "error_message": "Error description",
-  "error_stack": "Stack trace...",
-  "timestamp": "2024-01-01T00:00:00Z",
-  "metadata": {}
-}
-```
-
----
-
-### Update Execution Status
-
-```http
-POST /internal/update-status
-```
-
-**Headers:**
-
-```http
-X-N8N-Internal-Auth: your-internal-secret
-```
-
-**Request Body:**
-
-```json
-{
-  "usage_log_id": "uuid",
+  "execution_id": "exec-uuid-12345",
   "status": "completed",
-  "execution_time_ms": 1500,
-  "error_message": null,
-  "response_metadata": {}
+  "data": {"result": "success"},
+  "execution_time_ms": 150
 }
 ```
 
-**Status Values:**
-- `pending`
-- `running`
-- `completed`
-- `failed`
-- `timeout`
+---
+
+#### POST /api/v1/internal/log-error
+
+Log an error from n8n workflow.
+
+**Request Body:**
+```json
+{
+  "execution_id": "exec-uuid-12345",
+  "error_type": "validation_error",
+  "error_message": "Invalid input format",
+  "stack_trace": "..."
+}
+```
 
 ---
 
 ## Error Codes
 
-| Code | HTTP Status | Description |
-|------|-------------|-------------|
-| `bad_request` | 400 | Invalid request |
-| `unauthorized` | 401 | Authentication failed |
-| `forbidden` | 403 | Access denied |
-| `not_found` | 404 | Resource not found |
-| `conflict` | 409 | Resource already exists |
-| `insufficient_credits` | 402 | Not enough credits |
-| `rate_limit_exceeded` | 429 | Too many requests |
-| `internal_error` | 500 | Server error |
-| `n8n_error` | 502 | n8n error |
-| `gateway_timeout` | 504 | Request timeout |
+| HTTP Status | Error Code | Description |
+|-------------|------------|-------------|
+| 400 | `bad_request` | Invalid request format or parameters |
+| 401 | `unauthorized` | Missing or invalid authentication |
+| 402 | `insufficient_credits` | Not enough credits for execution |
+| 403 | `forbidden` | Access denied / Invalid HMAC |
+| 404 | `not_found` | Resource not found |
+| 422 | `validation_error` | Request validation failed |
+| 429 | `rate_limited` | Too many requests |
+| 500 | `internal_error` | Server error |
+| 502 | `n8n_error` | n8n webhook error |
+| 504 | `gateway_timeout` | n8n request timeout |
 
----
+## Rate Limiting
 
-## SDKs
+Default limits:
+- 100 requests per 60 seconds per tenant
+- 10 requests per second burst
 
-### Python
-
-```python
-import httpx
-import hmac
-import hashlib
-import time
-import json
-
-class GatewayClient:
-    def __init__(self, base_url: str, api_key: str, client_secret: str, tenant_id: str):
-        self.base_url = base_url
-        self.api_key = api_key
-        self.client_secret = client_secret
-        self.tenant_id = tenant_id
-    
-    def _sign_request(self, body: dict) -> tuple[str, str]:
-        timestamp = str(int(time.time()))
-        body_str = json.dumps(body)
-        signature = hmac.new(
-            self.client_secret.encode(),
-            (timestamp + body_str).encode(),
-            hashlib.sha256
-        ).hexdigest()
-        return timestamp, signature
-    
-    async def execute(self, workflow_id: str, data: dict) -> dict:
-        body = {"workflow_id": workflow_id, "data": data}
-        timestamp, signature = self._sign_request(body)
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/execute",
-                json=body,
-                headers={
-                    "X-API-Key": self.api_key,
-                    "X-Tenant-ID": self.tenant_id,
-                    "X-Timestamp": timestamp,
-                    "X-Signature": signature,
-                }
-            )
-            return response.json()
-
-# Usage
-client = GatewayClient(
-    base_url="https://api.example.com",
-    api_key="gw_live_xxx",
-    client_secret="secret",
-    tenant_id="my-tenant"
-)
-
-result = await client.execute(
-    workflow_id="uuid",
-    data={"prompt": "Hello, world!"}
-)
+Rate limit headers:
+```http
+X-RateLimit-Limit: 100
+X-RateLimit-Remaining: 95
+X-RateLimit-Reset: 1700000060
 ```
 
-### JavaScript/TypeScript
+## Webhooks
 
-```typescript
-import crypto from 'crypto';
+### Clerk User Sync
 
-class GatewayClient {
-  constructor(
-    private baseUrl: string,
-    private apiKey: string,
-    private clientSecret: string,
-    private tenantId: string
-  ) {}
+Endpoint: `POST /api/v1/webhooks/clerk`
 
-  private signRequest(body: object): { timestamp: string; signature: string } {
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const bodyStr = JSON.stringify(body);
-    const signature = crypto
-      .createHmac('sha256', this.clientSecret)
-      .update(timestamp + bodyStr)
-      .digest('hex');
-    return { timestamp, signature };
-  }
+Handles Clerk webhook events for user synchronization:
+- `user.created`: Creates profile in database
+- `user.updated`: Updates profile
+- `user.deleted`: Deactivates profile
 
-  async execute(workflowId: string, data: object): Promise<any> {
-    const body = { workflow_id: workflowId, data };
-    const { timestamp, signature } = this.signRequest(body);
+### Stripe Billing (Optional)
 
-    const response = await fetch(`${this.baseUrl}/api/v1/execute`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-API-Key': this.apiKey,
-        'X-Tenant-ID': this.tenantId,
-        'X-Timestamp': timestamp,
-        'X-Signature': signature,
-      },
-      body: JSON.stringify(body),
-    });
+Endpoint: `POST /api/v1/webhooks/stripe`
 
-    return response.json();
-  }
-}
-
-// Usage
-const client = new GatewayClient(
-  'https://api.example.com',
-  'gw_live_xxx',
-  'secret',
-  'my-tenant'
-);
-
-const result = await client.execute('uuid', { prompt: 'Hello!' });
-```
+Handles Stripe webhook events:
+- `invoice.paid`: Adds credits to organization
+- `invoice.payment_failed`: Logs failed payment

@@ -1,281 +1,240 @@
 # Supabase Setup Guide
 
-This guide walks you through setting up Supabase for the N8N Orchestration Gateway.
+Complete guide for setting up Supabase with Clerk Native Integration for the N8N Orchestration Gateway.
 
 ## Prerequisites
 
-- A Supabase account (https://supabase.com)
-- A new or existing Supabase project
+- Supabase account and project
+- Clerk account with application
+- Basic understanding of PostgreSQL and RLS
 
-## Step 1: Create a New Project
+## 1. Create Supabase Project
 
 1. Go to [Supabase Dashboard](https://supabase.com/dashboard)
 2. Click "New Project"
-3. Fill in:
-   - **Name**: `n8n-gateway` (or your preferred name)
-   - **Database Password**: Generate a strong password (save this!)
-   - **Region**: Choose closest to your users
-4. Click "Create new project"
-5. Wait for project setup to complete (~2 minutes)
+3. Enter project details:
+   - Name: `n8n-gateway`
+   - Database Password: (save this securely)
+   - Region: Choose closest to your users
+4. Wait for project to be provisioned
 
-## Step 2: Get Your API Keys
+## 2. Configure Clerk Native Integration
 
-1. In your project dashboard, go to **Settings** → **API**
-2. Copy these values to your `.env` file:
+### In Clerk Dashboard:
 
-```env
-SUPABASE_URL=https://your-project-ref.supabase.co
-SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+1. Go to your Clerk application
+2. Navigate to **Integrations** → **Supabase**
+3. Click "Enable Supabase Integration"
+4. Copy the **JWT Template** (this is auto-generated)
+
+### In Supabase Dashboard:
+
+1. Go to **Settings** → **API**
+2. Under **JWT Settings**, add Clerk as a JWT issuer:
+   - Issuer URL: `https://your-instance.clerk.accounts.dev`
+   - JWKS URL: `https://your-instance.clerk.accounts.dev/.well-known/jwks.json`
+
+3. Or, go to **Authentication** → **Providers** and enable Clerk:
+   ```sql
+   -- Alternative: Configure via SQL
+   ALTER SYSTEM SET "pgrst.jwt_secret" TO 'your-jwt-secret';
+   ```
+
+## 3. Apply Database Migrations
+
+### Migration 1: Initial Schema
+
+Run `supabase/migrations/01_initial_schema.sql` in the SQL Editor:
+
+This creates:
+- `profiles` table (TEXT id for Clerk user IDs)
+- `organizations` table with API key management
+- `organization_members` junction table
+- `workflows` table
+- `usage_logs` for billing
+- `invoices` for payments
+- `security_logs` for audit trail
+- `api_keys` for additional keys
+- Base RLS policies
+- Credit management RPCs
+
+### Migration 2: Clerk Native Integration
+
+Run `supabase/migrations/02_clerk_native_integration.sql`:
+
+This adds:
+- `auth.clerk_user_id()` helper function
+- `auth.clerk_org_id()` helper function
+- Updated RLS policies using native Clerk functions
+- Advisory lock functions for credential injection
+- Updated Vault functions for supabase_vault
+- Profile sync function for webhooks
+
+### Verify Migrations
+
+```sql
+-- Check helper functions exist
+SELECT auth.clerk_user_id();
+SELECT auth.clerk_org_id();
+
+-- Check tables
+SELECT table_name FROM information_schema.tables 
+WHERE table_schema = 'public';
+
+-- Check RLS is enabled
+SELECT tablename, rowsecurity 
+FROM pg_tables 
+WHERE schemaname = 'public';
 ```
 
-⚠️ **Security Warning**: 
-- The `SUPABASE_SERVICE_ROLE_KEY` bypasses Row Level Security
-- Never expose it to the client/browser
-- Only use it in your backend application
+## 4. Configure Vault for Credentials
 
-## Step 3: Run the Migration
+Supabase Vault stores encrypted tenant credentials:
 
-### Option A: Using Supabase SQL Editor
+```sql
+-- Store credentials (done via RPC from the gateway)
+SELECT private.store_tenant_credentials(
+    'org-uuid-12345',
+    '{"openai": {"api_key": "sk-xxx"}, "slack": {"access_token": "xoxb-xxx"}}'
+);
 
-1. Go to **SQL Editor** in your Supabase dashboard
-2. Click "New Query"
-3. Copy the contents of `supabase/migrations/01_initial_schema.sql`
-4. Click "Run" (or press Cmd/Ctrl + Enter)
-5. Verify no errors in the output
+-- Retrieve credentials (only service role can do this)
+SELECT private.get_tenant_credentials('org-uuid-12345');
+```
 
-### Option B: Using Supabase CLI
+## 5. API Keys and Configuration
+
+Get your API keys from Supabase Dashboard → Settings → API:
 
 ```bash
-# Install Supabase CLI
-npm install -g supabase
-
-# Login to Supabase
-supabase login
-
-# Link your project
-supabase link --project-ref your-project-ref
-
-# Run migrations
-supabase db push
+# .env file
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 ```
 
-## Step 4: Enable Required Extensions
+**Security Notes:**
+- `anon_key`: Safe for client-side, respects RLS
+- `service_role_key`: NEVER expose client-side, bypasses RLS
 
-The migration enables these extensions automatically, but verify they're active:
+## 6. Row Level Security (RLS) Overview
 
-1. Go to **Database** → **Extensions**
-2. Ensure these are enabled:
-   - `uuid-ossp` - UUID generation
-   - `pgcrypto` - Cryptographic functions
-   - `vault` - Secret management (Supabase Vault)
+### How It Works with Clerk
 
-If `vault` is not available (newer feature), you can use an alternative approach for credential storage (see below).
-
-## Step 5: Verify Tables
-
-Go to **Table Editor** and verify these tables exist:
-
-- `profiles`
-- `organizations`
-- `organization_members`
-- `workflows`
-- `usage_logs`
-- `invoices`
-- `security_logs`
-- `api_keys`
-
-## Step 6: Verify RLS Policies
-
-Go to **Authentication** → **Policies** and verify policies exist for each table.
-
-## Step 7: Configure Clerk Integration (Third-Party Auth)
-
-Supabase supports Clerk as a third-party auth provider:
-
-### 7.1 Get Clerk JWKS URL
-
-From your Clerk dashboard:
-1. Go to **JWT Templates** → **Supabase**
-2. Copy the JWKS URL (e.g., `https://your-instance.clerk.accounts.dev/.well-known/jwks.json`)
-
-### 7.2 Configure Supabase
-
-1. Go to **Authentication** → **Providers**
-2. Enable "Third-party Auth"
-3. Add your Clerk JWKS URL
-4. Set the issuer to your Clerk instance URL
-
-Alternatively, configure via SQL:
+The native integration sets JWT claims in the request context:
 
 ```sql
--- Enable third-party JWT validation
-ALTER SYSTEM SET "supabase.auth.external_jwks_url" = 'https://your-instance.clerk.accounts.dev/.well-known/jwks.json';
+-- Clerk user ID from JWT
+auth.clerk_user_id() -- Returns 'user_xxxxx'
+
+-- Clerk organization ID from JWT
+auth.clerk_org_id() -- Returns 'org_xxxxx' or NULL
 ```
 
-## Step 8: Test the Setup
-
-Run this query in SQL Editor to verify:
+### Policy Examples
 
 ```sql
--- Test UUID generation
-SELECT uuid_generate_v4();
+-- Users can only read their own profile
+CREATE POLICY "profiles_select_own" ON profiles
+    FOR SELECT
+    USING (id = auth.clerk_user_id());
 
--- Test profile creation
-INSERT INTO profiles (id, email, name)
-VALUES ('test_user_123', 'test@example.com', 'Test User')
-RETURNING *;
+-- Members can read their organization's data
+CREATE POLICY "org_data_select" ON some_table
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM organization_members
+            WHERE organization_id = some_table.organization_id
+            AND profile_id = auth.clerk_user_id()
+        )
+    );
+```
 
--- Test organization creation
+## 7. Testing the Integration
+
+### Test Profile Creation
+
+```sql
+-- Insert a test profile
+INSERT INTO profiles (id, email, name) 
+VALUES ('user_test123', 'test@example.com', 'Test User');
+
+-- Verify RLS (should fail without proper JWT)
+SET request.jwt.claims = '{"sub": "user_test123"}';
+SELECT * FROM profiles;  -- Should return the test user
+```
+
+### Test Organization Flow
+
+```sql
+-- Create test organization
 INSERT INTO organizations (name, owner_id, tenant_id, api_key_hash, api_key_prefix, credits)
-VALUES ('Test Org', 'test_user_123', 'test-tenant', 'hash', 'gw_test_', 100)
-RETURNING *;
+VALUES ('Test Org', 'user_test123', 'test-tenant', 'hash', 'gw_live_', 100);
 
--- Verify credit deduction function
-SELECT * FROM fn_deduct_credits(
-  (SELECT id FROM organizations WHERE tenant_id = 'test-tenant'),
-  1,
-  NULL,
-  'test_user_123',
-  '{"test": true}'::jsonb
-);
-
--- Clean up test data
-DELETE FROM organizations WHERE tenant_id = 'test-tenant';
-DELETE FROM profiles WHERE id = 'test_user_123';
+-- The trigger should auto-create membership
+SELECT * FROM organization_members WHERE profile_id = 'user_test123';
 ```
 
-## Vault Setup (Credential Storage)
+## 8. Webhook Configuration (Optional)
 
-### If Vault Extension is Available
+To sync users from Clerk automatically:
 
-The migration automatically creates functions to store/retrieve tenant credentials:
+### In Clerk Dashboard:
+
+1. Go to **Webhooks**
+2. Create a new webhook endpoint:
+   - URL: `https://your-gateway.com/api/v1/webhooks/clerk`
+   - Events: `user.created`, `user.updated`, `user.deleted`
+3. Copy the signing secret
+
+### In Gateway:
+
+```bash
+# Add to .env
+CLERK_WEBHOOK_SECRET=whsec_xxxxx
+```
+
+## 9. Troubleshooting
+
+### Common Issues
+
+**"Invalid input syntax for type uuid"**
+- Cause: Trying to use Clerk user ID (text) in UUID column
+- Solution: Ensure `profiles.id` is TEXT type, not UUID
+
+**"Permission denied for table"**
+- Cause: RLS blocking access
+- Solution: Check JWT claims are being set correctly
+
+**"Function auth.clerk_user_id() does not exist"**
+- Cause: Migration not applied
+- Solution: Run migration 02_clerk_native_integration.sql
+
+### Debug Queries
 
 ```sql
--- Store credentials (encrypted at rest)
-SELECT private.store_tenant_credentials(
-  'org-uuid-here',
-  '{"linkedin_api_key": "secret", "openai_key": "sk-xxx"}'::jsonb
-);
+-- Check current user context
+SELECT 
+    current_setting('request.jwt.claims', true) as claims,
+    auth.clerk_user_id() as user_id,
+    auth.clerk_org_id() as org_id;
 
--- Retrieve credentials (decrypted)
-SELECT private.get_tenant_credentials('org-uuid-here');
+-- Check if user has access to organization
+SELECT EXISTS (
+    SELECT 1 FROM organization_members
+    WHERE profile_id = auth.clerk_user_id()
+    AND organization_id = 'org-uuid'
+);
 ```
 
-### Alternative: Custom Encrypted Storage
+## 10. Production Checklist
 
-If the Vault extension isn't available, use this alternative:
-
-```sql
--- Create encrypted credentials table
-CREATE TABLE tenant_credentials (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-  organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
-  credentials_encrypted BYTEA NOT NULL,
-  iv BYTEA NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  UNIQUE(organization_id)
-);
-
--- Enable RLS
-ALTER TABLE tenant_credentials ENABLE ROW LEVEL SECURITY;
-
--- Only service role can access
-CREATE POLICY "credentials_service_role" ON tenant_credentials
-  FOR ALL
-  USING (auth.role() = 'service_role');
-```
-
-Then handle encryption in your Python application using `cryptography` library.
-
-## Production Configuration
-
-### 1. Connection Pooling
-
-For production, enable connection pooling:
-
-1. Go to **Settings** → **Database**
-2. Note the "Pooler" connection strings
-3. Use the pooler URL in your application for better performance
-
-### 2. Database Backups
-
-Supabase handles automatic backups, but configure:
-
-1. Go to **Database** → **Backups**
-2. Verify daily backups are enabled
-3. Consider enabling Point-in-Time Recovery (Pro plan)
-
-### 3. Performance Monitoring
-
-1. Enable **Database** → **Reports** for query insights
-2. Monitor slow queries
-3. Add indexes as needed based on usage patterns
-
-### 4. Realtime (Optional)
-
-If you need real-time updates:
-
-1. Go to **Database** → **Publications**
-2. Create a publication for tables you want to stream
-3. Use Supabase client for realtime subscriptions
-
-## Troubleshooting
-
-### "Permission denied" Errors
-
-- Verify RLS policies are correctly configured
-- Check that you're using the service role key for admin operations
-- Ensure the authenticated user has proper role in `organization_members`
-
-### "Function not found" Errors
-
-- Re-run the migration
-- Check SQL syntax for your Supabase version
-- Verify extensions are enabled
-
-### Slow Queries
-
-- Add indexes on frequently queried columns
-- Use `EXPLAIN ANALYZE` to identify bottlenecks
-- Consider partitioning `usage_logs` by date for large datasets
-
-### Vault Not Available
-
-- Use the alternative encrypted storage approach above
-- Or use external secret management (AWS Secrets Manager, HashiCorp Vault)
-
-## Database Schema Reference
-
-### Tables
-
-| Table | Purpose |
-|-------|---------|
-| `profiles` | User profiles (synced from Clerk) |
-| `organizations` | Multi-tenant organizations |
-| `organization_members` | User-organization membership |
-| `workflows` | n8n workflow configurations |
-| `usage_logs` | Execution logs for billing |
-| `invoices` | Billing records |
-| `security_logs` | Security event tracking |
-| `api_keys` | Additional API keys |
-
-### Key Functions
-
-| Function | Purpose |
-|----------|---------|
-| `fn_deduct_credits` | Atomically deduct credits |
-| `fn_add_credits` | Add credits after purchase |
-| `fn_refund_credits` | Refund credits for failures |
-| `fn_update_usage_status` | Update execution status |
-| `private.store_tenant_credentials` | Store encrypted credentials |
-| `private.get_tenant_credentials` | Retrieve decrypted credentials |
-
-## Next Steps
-
-After Supabase setup:
-
-1. [Configure Clerk Authentication](CLERK_SETUP.md)
-2. [Set up n8n Integration](N8N_SETUP.md)
-3. [Deploy the Gateway](DEPLOYMENT.md)
+- [ ] All migrations applied
+- [ ] RLS enabled on all tables
+- [ ] Service role key secured
+- [ ] Vault configured for credentials
+- [ ] Backup strategy in place
+- [ ] Connection pooling configured
+- [ ] Database password rotated from default
+- [ ] SSL enforced for connections
