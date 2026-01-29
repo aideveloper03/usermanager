@@ -113,6 +113,9 @@ class SecurityEventType(str, Enum):
     UNAUTHORIZED_ACCESS = "unauthorized_access"
     TOKEN_EXPIRED = "token_expired"
     INVALID_API_KEY = "invalid_api_key"
+    N8N_WORKFLOW_ERROR = "n8n_workflow_error"
+    WEBHOOK_RECEIVED = "webhook_received"
+    CREDENTIAL_ACCESS = "credential_access"
 
 
 # =============================================================================

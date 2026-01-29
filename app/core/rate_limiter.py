@@ -101,7 +101,7 @@ async def rate_limit_exceeded_handler(
     try:
         db = get_db_service()
         await db.log_security_event(
-            event_type="rate_limit_exceeded",
+            event_type=SecurityEventType.RATE_LIMIT_EXCEEDED.value,
             severity="warning",
             ip_address=get_remote_address(request),
             user_agent=request.headers.get("User-Agent"),

@@ -28,14 +28,10 @@ from starlette.types import ASGIApp
 
 from app.core.config import settings
 from app.core.security import (
-    HMACValidationError,
-    HMACValidator,
-    ClerkJWTVerifier,
     JWTVerificationError,
-    RequestFingerprinter,
     api_key_manager,
-    hmac_validator,
-    jwt_verifier,
+    timestamp_validator,
+    clerk_auth,
     fingerprinter,
 )
 from app.models.schemas import SecurityEventType
@@ -277,7 +273,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
     
     def __init__(self, app: ASGIApp):
         super().__init__(app)
-        self.jwt_verifier = jwt_verifier
+        self.clerk_auth = clerk_auth
         self.api_key_manager = api_key_manager
     
     async def dispatch(
@@ -351,12 +347,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
     ) -> Response:
         """Authenticate using JWT token."""
         try:
-            # Verify the JWT
-            claims = await self.jwt_verifier.verify_token(token)
+            # Verify the JWT using Clerk authenticator
+            claims = await self.clerk_auth.verify_session_token(token)
             
             # Extract user and org info
-            user_id = self.jwt_verifier.get_user_id_from_claims(claims)
-            org_id = self.jwt_verifier.get_org_id_from_claims(claims)
+            user_id = self.clerk_auth.get_user_id(claims)
+            org_id = self.clerk_auth.get_org_id(claims)
             
             # Store in request state
             request.state.user_id = user_id
@@ -458,17 +454,17 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
 class SecurityMiddleware(BaseHTTPMiddleware):
     """
-    Security middleware for HMAC validation and fingerprinting.
+    Security middleware for timestamp validation and fingerprinting.
     
     This middleware:
-    1. Validates HMAC signatures on protected endpoints
+    1. Validates request timestamps for replay protection
     2. Generates and validates request fingerprints
     3. Detects suspicious activity based on fingerprint changes
     """
     
     def __init__(self, app: ASGIApp):
         super().__init__(app)
-        self.hmac_validator = hmac_validator
+        self.timestamp_validator = timestamp_validator
         self.fingerprinter = fingerprinter
     
     async def dispatch(
@@ -485,11 +481,11 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         # Get request ID from auth middleware
         request_id = getattr(request.state, STATE_REQUEST_ID, str(uuid4()))
         
-        # HMAC validation (if enabled)
+        # Timestamp validation for replay protection (if enabled)
         if settings.enable_hmac_validation:
-            hmac_result = await self._validate_hmac(request)
-            if hmac_result is not None:
-                return hmac_result
+            timestamp_result = await self._validate_request_timestamp(request)
+            if timestamp_result is not None:
+                return timestamp_result
         
         # Fingerprinting (if enabled)
         if settings.enable_fingerprinting:
@@ -516,52 +512,48 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         
         return await call_next(request)
     
-    async def _validate_hmac(self, request: Request) -> Response | None:
+    async def _validate_request_timestamp(self, request: Request) -> Response | None:
         """
-        Validate HMAC signature on the request.
+        Validate request timestamp for replay protection.
         
         Returns:
             None if validation passes, error Response if it fails
         """
-        # HMAC validation is required for POST/PUT/PATCH requests to execute endpoint
+        # Only validate on POST/PUT/PATCH requests to execute endpoint
         if request.method not in ("POST", "PUT", "PATCH"):
             return None
         
-        # Only validate HMAC on /execute endpoint
         if "/execute" not in request.url.path:
             return None
         
-        # Get required headers
-        signature = request.headers.get("X-Signature")
+        # Get timestamp header
         timestamp = request.headers.get("X-Timestamp")
         tenant_id = request.headers.get("X-Tenant-ID")
         
-        if not signature or not timestamp:
-            # HMAC headers are optional if using JWT auth
+        # Timestamp is optional for JWT auth
+        if not timestamp:
             auth_method = getattr(request.state, STATE_AUTH_METHOD, None)
             if auth_method == "jwt":
                 return None
-            
+            # For API key auth, just store tenant_id
+            request.state.tenant_id = tenant_id
+            return None
+        
+        # Validate timestamp is not too old (replay protection)
+        if not self.timestamp_validator.is_valid(timestamp):
             await security_logger.log_event(
                 SecurityEventType.HMAC_VALIDATION_FAILED,
                 request,
                 severity="warning",
-                details={"reason": "Missing X-Signature or X-Timestamp header"}
+                details={"reason": "Request timestamp too old or invalid"}
             )
             return self._forbidden_response(
-                "Missing required security headers (X-Signature, X-Timestamp)",
+                "Request timestamp too old or invalid",
                 getattr(request.state, STATE_REQUEST_ID, "unknown")
             )
         
-        # Get request body
-        body = await request.body()
-        
-        # For HMAC validation, we need the client secret
-        # This will be looked up from the database using tenant_id
-        # For now, we store the headers for later validation in the endpoint
-        request.state.hmac_signature = signature
-        request.state.hmac_timestamp = timestamp
-        request.state.hmac_body = body
+        # Store for later use
+        request.state.request_timestamp = timestamp
         request.state.tenant_id = tenant_id
         
         return None

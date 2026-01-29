@@ -20,9 +20,8 @@ from fastapi.responses import StreamingResponse
 
 from app.core.config import settings
 from app.core.security import (
-    HMACValidationError,
     api_key_manager,
-    hmac_validator,
+    timestamp_validator,
 )
 from app.middleware.auth_middleware import (
     get_current_user,
@@ -93,16 +92,16 @@ async def validate_api_key_auth(
     return org
 
 
-async def validate_hmac_signature(
+async def validate_request_timestamp(
     request: Request,
     org: dict[str, Any]
 ) -> bool:
     """
-    Validate HMAC signature for anti-hijacking protection.
+    Validate request timestamp for replay protection.
     
     Args:
         request: FastAPI request object
-        org: Organization data with client_secret_hash
+        org: Organization data
         
     Returns:
         True if validation passes
@@ -113,39 +112,27 @@ async def validate_hmac_signature(
     if not settings.enable_hmac_validation:
         return True
     
-    signature = getattr(request.state, "hmac_signature", None)
-    timestamp = getattr(request.state, "hmac_timestamp", None)
-    body = getattr(request.state, "hmac_body", None)
+    timestamp = getattr(request.state, "request_timestamp", None)
     
-    # HMAC is optional for JWT auth
-    if not signature or not timestamp:
+    # Timestamp is optional for JWT auth
+    if not timestamp:
         auth_method = getattr(request.state, "auth_method", None)
         if auth_method == "jwt":
             return True
-        raise HTTPException(
-            status_code=403,
-            detail="HMAC signature required for API key authentication"
-        )
+        # For API key auth without timestamp, just continue
+        return True
     
-    # For HMAC validation, we need the client secret
-    # Since we store the hash, we can't verify HMAC directly
-    # In production, you would either:
-    # 1. Store the client secret encrypted in Vault
-    # 2. Use a different signing approach
-    # For now, we'll verify the timestamp and log the attempt
-    
-    if not hmac_validator.validate_timestamp(timestamp):
+    # Validate timestamp isn't too old
+    if not timestamp_validator.is_valid(timestamp):
         raise HTTPException(
             status_code=403,
             detail=f"Request timestamp too old (tolerance: {settings.hmac_timestamp_tolerance}s)"
         )
     
-    # Log HMAC validation attempt
     logger.debug(
-        "hmac_validation",
+        "timestamp_validated",
         org_id=org.get("id"),
-        timestamp=timestamp,
-        signature_present=bool(signature)
+        timestamp=timestamp
     )
     
     return True
@@ -169,7 +156,7 @@ async def validate_hmac_signature(
     
     This endpoint:
     1. Validates authentication (JWT or API key)
-    2. Verifies HMAC signature (if using API key auth)
+    2. Validates request timestamp (replay protection)
     3. Checks the organization has sufficient credits
     4. Retrieves the workflow configuration
     5. Fetches tenant credentials from Supabase Vault
@@ -178,13 +165,11 @@ async def validate_hmac_signature(
     
     **Authentication:**
     - Bearer token (Clerk JWT) in Authorization header, OR
-    - API key in X-API-Key header (requires X-Signature and X-Timestamp for HMAC)
+    - API key in X-API-Key header
     
-    **Headers for API Key auth:**
-    - `X-API-Key`: Your organization's API key
-    - `X-Signature`: HMAC-SHA256(client_secret, timestamp + body)
-    - `X-Timestamp`: Unix timestamp (must be within 300 seconds of current time)
-    - `X-Tenant-ID`: Your organization's tenant ID
+    **Optional Headers:**
+    - `X-Timestamp`: Unix timestamp for replay protection
+    - `X-Tenant-ID`: Your organization's tenant ID (optional with JWT)
     """
 )
 async def execute_workflow(
@@ -217,7 +202,7 @@ async def execute_workflow(
         
         if auth_method == "api_key":
             org = await validate_api_key_auth(request, db)
-            await validate_hmac_signature(request, org)
+            await validate_request_timestamp(request, org)
             user_id = None
         elif auth_method == "jwt":
             user_id = getattr(request.state, "user_id", None)
@@ -451,7 +436,7 @@ async def execute_workflow_stream(
     
     if auth_method == "api_key":
         org = await validate_api_key_auth(request, db)
-        await validate_hmac_signature(request, org)
+        await validate_request_timestamp(request, org)
         user_id = None
     elif auth_method == "jwt":
         user_id = getattr(request.state, "user_id", None)

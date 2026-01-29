@@ -10,100 +10,57 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.core.security import (
-    HMACValidationError,
-    HMACValidator,
     JWTVerificationError,
     RequestFingerprinter,
     Sanitizer,
     APIKeyManager,
-    hmac_validator,
+    TimestampValidator,
     sanitizer,
     fingerprinter,
     api_key_manager,
+    timestamp_validator,
 )
 
 
-class TestHMACValidator:
-    """Tests for HMAC signature validation."""
-    
-    def test_compute_signature(self):
-        """Test HMAC signature computation."""
-        validator = HMACValidator()
-        
-        client_secret = "test-secret"
-        timestamp = "1700000000"
-        body = b'{"test": "data"}'
-        
-        signature = validator.compute_signature(client_secret, timestamp, body)
-        
-        # Verify it's a valid hex string
-        assert len(signature) == 64
-        assert all(c in "0123456789abcdef" for c in signature)
-        
-        # Verify it's deterministic
-        signature2 = validator.compute_signature(client_secret, timestamp, body)
-        assert signature == signature2
+class TestTimestampValidator:
+    """Tests for timestamp validation (replay protection)."""
     
     def test_validate_timestamp_valid(self):
         """Test timestamp validation with valid timestamp."""
-        validator = HMACValidator(timestamp_tolerance=300)
+        validator = TimestampValidator(tolerance_seconds=300)
         
         # Current timestamp should be valid
         current_ts = str(int(time.time()))
-        assert validator.validate_timestamp(current_ts) is True
+        assert validator.is_valid(current_ts) is True
     
     def test_validate_timestamp_expired(self):
         """Test timestamp validation with expired timestamp."""
-        validator = HMACValidator(timestamp_tolerance=300)
+        validator = TimestampValidator(tolerance_seconds=300)
         
         # Old timestamp should be invalid
         old_ts = str(int(time.time()) - 600)
-        assert validator.validate_timestamp(old_ts) is False
+        assert validator.is_valid(old_ts) is False
     
-    def test_validate_timestamp_invalid(self):
+    def test_validate_timestamp_invalid_format(self):
         """Test timestamp validation with invalid input."""
-        validator = HMACValidator()
+        validator = TimestampValidator(tolerance_seconds=300)
         
-        assert validator.validate_timestamp("not-a-number") is False
-        assert validator.validate_timestamp("") is False
+        assert validator.is_valid("not-a-number") is False
+        assert validator.is_valid("") is False
+        assert validator.is_valid(None) is False
     
-    def test_validate_signature_success(self):
-        """Test successful signature validation."""
-        validator = HMACValidator(timestamp_tolerance=300)
+    def test_validate_timestamp_integer_input(self):
+        """Test timestamp validation with integer input."""
+        validator = TimestampValidator(tolerance_seconds=300)
         
-        client_secret = "test-secret"
-        timestamp = str(int(time.time()))
-        body = b'{"test": "data"}'
-        
-        # Compute correct signature
-        signature = validator.compute_signature(client_secret, timestamp, body)
-        
-        # Validation should pass
-        result = validator.validate_signature(client_secret, timestamp, body, signature)
-        assert result is True
+        # Integer timestamp should work
+        current_ts = int(time.time())
+        assert validator.is_valid(current_ts) is True
     
-    def test_validate_signature_invalid(self):
-        """Test signature validation with wrong signature."""
-        validator = HMACValidator(timestamp_tolerance=300)
-        
-        client_secret = "test-secret"
-        timestamp = str(int(time.time()))
-        body = b'{"test": "data"}'
-        
-        with pytest.raises(HMACValidationError, match="Invalid signature"):
-            validator.validate_signature(client_secret, timestamp, body, "wrong-signature")
-    
-    def test_validate_signature_expired_timestamp(self):
-        """Test signature validation with expired timestamp."""
-        validator = HMACValidator(timestamp_tolerance=300)
-        
-        client_secret = "test-secret"
-        old_timestamp = str(int(time.time()) - 600)
-        body = b'{"test": "data"}'
-        signature = validator.compute_signature(client_secret, old_timestamp, body)
-        
-        with pytest.raises(HMACValidationError, match="too old"):
-            validator.validate_signature(client_secret, old_timestamp, body, signature)
+    def test_global_validator(self):
+        """Test the global timestamp validator instance."""
+        current_ts = str(int(time.time()))
+        assert timestamp_validator.is_valid(current_ts) is True
 
 
 class TestSanitizer:
@@ -150,6 +107,11 @@ class TestSanitizer:
         
         assert "<b>" not in result[0]
         assert "<script>" not in result[1]["key"]
+    
+    def test_sanitize_non_string_passthrough(self):
+        """Test that non-string values pass through unchanged."""
+        assert sanitizer.sanitize_string(123) == 123
+        assert sanitizer.sanitize_string(None) is None
 
 
 class TestRequestFingerprinter:
@@ -195,6 +157,13 @@ class TestRequestFingerprinter:
         
         assert fingerprinter.compare_fingerprints(fp, fp) is True
         assert fingerprinter.compare_fingerprints(fp, "different") is False
+    
+    def test_fingerprint_case_insensitive(self):
+        """Test that fingerprinting normalizes case."""
+        fp1 = fingerprinter.generate_fingerprint("192.168.1.1", "Mozilla/5.0", "TENANT")
+        fp2 = fingerprinter.generate_fingerprint("192.168.1.1", "Mozilla/5.0", "tenant")
+        
+        assert fp1 == fp2
 
 
 class TestAPIKeyManager:
@@ -238,3 +207,32 @@ class TestAPIKeyManager:
         prefix = api_key_manager.extract_prefix("gw_live_abc123def456")
         
         assert prefix == "gw_live_abc1"
+    
+    def test_extract_prefix_short_key(self):
+        """Test prefix extraction with short key."""
+        prefix = api_key_manager.extract_prefix("short")
+        
+        assert prefix == "short"
+    
+    def test_hash_key_deterministic(self):
+        """Test that hashing is deterministic."""
+        key = "test-api-key-123"
+        hash1 = api_key_manager.hash_key(key)
+        hash2 = api_key_manager.hash_key(key)
+        
+        assert hash1 == hash2
+        assert len(hash1) == 64
+
+
+class TestJWTVerificationError:
+    """Tests for JWT verification error handling."""
+    
+    def test_exception_message(self):
+        """Test exception message is preserved."""
+        error = JWTVerificationError("Token expired")
+        assert str(error) == "Token expired"
+    
+    def test_exception_inheritance(self):
+        """Test exception is an Exception subclass."""
+        error = JWTVerificationError("Test error")
+        assert isinstance(error, Exception)

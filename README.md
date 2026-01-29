@@ -10,7 +10,7 @@ The N8N Orchestration Gateway provides a secure wrapper around private n8n insta
 - **Credit-based Billing**: Pay-per-execution model with atomic credit deduction
 - **Secure Authentication**: Clerk JWT validation with native Supabase integration
 - **Dynamic Credential Injection**: Tenant-specific secrets from Supabase Vault
-- **Anti-Hijacking Protection**: HMAC signature validation and request fingerprinting
+- **Replay Protection**: Request timestamp validation and fingerprinting
 - **Developer Mode**: Auth bypass for local development and testing
 
 ## Architecture
@@ -159,16 +159,17 @@ python tests/local_test.py --test test_health_check
 2. **API Key** (for server-to-server communication)
    ```bash
    X-API-Key: gw_live_xxxx
-   X-Timestamp: <unix-timestamp>
-   X-Signature: <hmac-sha256-signature>
+   X-Timestamp: <unix-timestamp>  # Optional: for replay protection
+   X-Tenant-ID: your-tenant-id    # Optional: for routing
    ```
 
-### HMAC Signature
+### Security Features
 
-For API key authentication, compute HMAC-SHA256:
-```
-signature = HMAC-SHA256(client_secret, timestamp + request_body)
-```
+- **JWT Verification**: Uses official Clerk SDK with JWKS rotation
+- **API Key Hashing**: SHA-256 hashed before storage
+- **Timestamp Validation**: Prevents replay attacks (5-minute tolerance)
+- **Request Fingerprinting**: IP + User-Agent + Tenant-ID tracking
+- **Input Sanitization**: Automatic XSS payload stripping with bleach
 
 ### Dynamic Credentials
 

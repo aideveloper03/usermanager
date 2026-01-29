@@ -15,6 +15,7 @@ from app.models.schemas import (
     ExecutionStatus,
     InternalLogRequest,
     N8NErrorCallback,
+    SecurityEventType,
 )
 from app.services.database import DatabaseService, get_db_service
 
@@ -63,7 +64,7 @@ async def log_error(
     # For now, we just log the error
     
     await db.log_security_event(
-        event_type="n8n_workflow_error",
+        event_type=SecurityEventType.N8N_WORKFLOW_ERROR.value,
         severity="warning",
         details={
             "n8n_workflow_id": error_data.workflow_id,
