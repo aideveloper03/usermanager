@@ -1,14 +1,17 @@
 -- =============================================================================
--- N8N ORCHESTRATION GATEWAY - CLERK NATIVE INTEGRATION
+-- N8N ORCHESTRATION GATEWAY - CLERK NATIVE SUPABASE INTEGRATION
 -- =============================================================================
 -- This migration updates the schema for Clerk's native Supabase integration.
 -- 
+-- Integration Setup:
+-- 1. In Clerk Dashboard: Enable Supabase integration to get Clerk domain
+-- 2. In Supabase Dashboard: Add Clerk as third-party auth provider
+-- 
 -- Key Changes:
--- 1. Creates auth.clerk_user_id() helper function for RLS policies
--- 2. Creates auth.clerk_org_id() helper function for organization context
--- 3. Updates RLS policies to use native Clerk JWT claims
--- 4. Adds advisory lock functions for credential injection
--- 5. Updates vault functions for secure credential management
+-- 1. Uses auth.jwt()->>'sub' for Clerk user ID (native integration)
+-- 2. Uses auth.jwt()->>'org_id' for organization context
+-- 3. RLS policies use native JWT claims
+-- 4. Compatible with Clerk's "role": "authenticated" claim
 -- =============================================================================
 
 -- =============================================================================
@@ -18,16 +21,16 @@
 -- Supabase-Clerk native integration.
 
 -- Helper function to get the authenticated Clerk user ID
+-- Uses the 'sub' claim from the JWT which contains the Clerk user ID
 CREATE OR REPLACE FUNCTION auth.clerk_user_id()
 RETURNS TEXT
 LANGUAGE sql
 STABLE
 AS $$
-    -- Native Clerk integration sets JWT claims in request settings
     SELECT COALESCE(
-        -- Try native Clerk integration format
-        nullif(current_setting('request.jwt.claims', true), '')::json->>'sub',
-        -- Fallback to auth.uid() cast for backward compatibility
+        -- Native Clerk integration: get 'sub' claim from JWT
+        (auth.jwt()->>'sub'),
+        -- Fallback to auth.uid() for backward compatibility
         (auth.uid())::TEXT
     );
 $$;
@@ -42,7 +45,7 @@ RETURNS TEXT
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT nullif(current_setting('request.jwt.claims', true), '')::json->>'org_id';
+    SELECT auth.jwt()->>'org_id';
 $$;
 
 COMMENT ON FUNCTION auth.clerk_org_id() IS 
@@ -55,7 +58,7 @@ RETURNS TEXT
 LANGUAGE sql
 STABLE
 AS $$
-    SELECT nullif(current_setting('request.jwt.claims', true), '')::json->>'org_role';
+    SELECT auth.jwt()->>'org_role';
 $$;
 
 COMMENT ON FUNCTION auth.clerk_org_role() IS 
@@ -70,6 +73,9 @@ STABLE
 AS $$
     SELECT auth.clerk_user_id() IS NOT NULL;
 $$;
+
+COMMENT ON FUNCTION auth.is_authenticated() IS 
+    'Returns true if the request has a valid authenticated user.';
 
 
 -- =============================================================================
@@ -114,23 +120,25 @@ DROP POLICY IF EXISTS "api_keys_service_role" ON api_keys;
 
 
 -- =============================================================================
--- RECREATE RLS POLICIES WITH CLERK NATIVE FUNCTIONS
+-- RECREATE RLS POLICIES WITH CLERK NATIVE INTEGRATION
 -- =============================================================================
+-- These policies use auth.jwt()->>'sub' for the Clerk user ID which is the
+-- standard pattern for Clerk's native Supabase integration.
 
 -- -----------------------------------------------------------------------------
 -- PROFILES POLICIES
 -- -----------------------------------------------------------------------------
 
--- Users can read their own profile (using Clerk user ID)
+-- Users can read their own profile (using Clerk user ID from JWT)
 CREATE POLICY "profiles_select_own" ON profiles
     FOR SELECT
-    USING (id = auth.clerk_user_id());
+    USING (id = (auth.jwt()->>'sub'));
 
 -- Users can update their own profile
 CREATE POLICY "profiles_update_own" ON profiles
     FOR UPDATE
-    USING (id = auth.clerk_user_id())
-    WITH CHECK (id = auth.clerk_user_id());
+    USING (id = (auth.jwt()->>'sub'))
+    WITH CHECK (id = (auth.jwt()->>'sub'));
 
 -- Service role can manage all profiles
 CREATE POLICY "profiles_service_role" ON profiles
@@ -149,7 +157,7 @@ CREATE POLICY "organizations_select_member" ON organizations
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = organizations.id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
         )
     );
 
@@ -160,7 +168,7 @@ CREATE POLICY "organizations_update_admin" ON organizations
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = organizations.id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
             AND role IN ('owner', 'admin')
         )
     )
@@ -168,7 +176,7 @@ CREATE POLICY "organizations_update_admin" ON organizations
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = organizations.id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
             AND role IN ('owner', 'admin')
         )
     );
@@ -190,7 +198,7 @@ CREATE POLICY "org_members_select" ON organization_members
         EXISTS (
             SELECT 1 FROM organization_members om
             WHERE om.organization_id = organization_members.organization_id
-            AND om.profile_id = auth.clerk_user_id()
+            AND om.profile_id = (auth.jwt()->>'sub')
         )
     );
 
@@ -201,7 +209,7 @@ CREATE POLICY "org_members_admin" ON organization_members
         EXISTS (
             SELECT 1 FROM organization_members om
             WHERE om.organization_id = organization_members.organization_id
-            AND om.profile_id = auth.clerk_user_id()
+            AND om.profile_id = (auth.jwt()->>'sub')
             AND om.role IN ('owner', 'admin')
         )
     );
@@ -223,7 +231,7 @@ CREATE POLICY "workflows_select_member" ON workflows
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = workflows.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
         )
     );
 
@@ -234,7 +242,7 @@ CREATE POLICY "workflows_admin" ON workflows
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = workflows.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
             AND role IN ('owner', 'admin')
         )
     );
@@ -256,7 +264,7 @@ CREATE POLICY "usage_logs_select_member" ON usage_logs
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = usage_logs.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
         )
     );
 
@@ -277,7 +285,7 @@ CREATE POLICY "invoices_select_member" ON invoices
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = invoices.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
         )
     );
 
@@ -298,7 +306,7 @@ CREATE POLICY "security_logs_select_admin" ON security_logs
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = security_logs.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
             AND role IN ('owner', 'admin')
         )
     );
@@ -320,7 +328,7 @@ CREATE POLICY "api_keys_admin" ON api_keys
         EXISTS (
             SELECT 1 FROM organization_members
             WHERE organization_id = api_keys.organization_id
-            AND profile_id = auth.clerk_user_id()
+            AND profile_id = (auth.jwt()->>'sub')
             AND role IN ('owner', 'admin')
         )
     );
@@ -351,7 +359,7 @@ CREATE TABLE IF NOT EXISTS n8n_base_credentials (
 COMMENT ON TABLE n8n_base_credentials IS 
     'Maps service types to their base credential IDs in n8n. These are the "static identity" credentials that get dynamically updated with tenant data.';
 
-CREATE INDEX idx_n8n_base_credentials_service ON n8n_base_credentials(service_type);
+CREATE INDEX IF NOT EXISTS idx_n8n_base_credentials_service ON n8n_base_credentials(service_type);
 
 
 -- Function to acquire advisory lock for credential updates
@@ -366,28 +374,18 @@ SET search_path = public
 AS $$
 DECLARE
     v_lock_key BIGINT;
-    v_acquired BOOLEAN;
 BEGIN
     -- Generate a consistent lock key from org_id
-    -- Using hashtext to convert UUID to a bigint for pg_advisory_xact_lock
     v_lock_key := ('x' || substr(md5(p_org_id::TEXT), 1, 16))::bit(64)::bigint;
     
     -- Try to acquire the lock with timeout
-    -- pg_advisory_xact_lock_shared allows concurrent reads but exclusive writes
     BEGIN
-        -- Use statement_timeout to implement timeout
         EXECUTE format('SET LOCAL statement_timeout = %L', p_timeout_ms || 'ms');
-        
-        -- Acquire transaction-level exclusive lock
         PERFORM pg_advisory_xact_lock(v_lock_key);
-        
-        -- Reset timeout
         RESET statement_timeout;
-        
         RETURN TRUE;
     EXCEPTION 
         WHEN query_canceled THEN
-            -- Timeout occurred
             RESET statement_timeout;
             RETURN FALSE;
         WHEN OTHERS THEN
@@ -441,124 +439,6 @@ COMMENT ON FUNCTION fn_get_credentials_with_lock(UUID, TEXT[]) IS
 
 
 -- =============================================================================
--- UPDATED VAULT FUNCTIONS FOR SUPABASE_VAULT
--- =============================================================================
--- Updated to use supabase_vault extension (the new name for vault)
-
--- Function to store tenant credentials in Supabase Vault
-CREATE OR REPLACE FUNCTION private.store_tenant_credentials(
-    p_org_id UUID,
-    p_credentials JSONB
-) RETURNS UUID
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, supabase_vault, vault
-AS $$
-DECLARE
-    v_secret_id UUID;
-    v_secret_name TEXT;
-BEGIN
-    v_secret_name := 'tenant_creds_' || p_org_id::TEXT;
-    
-    -- Check if secret already exists and delete it
-    -- Try supabase_vault schema first, fall back to vault
-    BEGIN
-        DELETE FROM vault.secrets WHERE name = v_secret_name;
-    EXCEPTION WHEN undefined_table THEN
-        -- Try supabase_vault schema
-        DELETE FROM supabase_vault.secrets WHERE name = v_secret_name;
-    END;
-    
-    -- Insert new secret
-    BEGIN
-        INSERT INTO vault.secrets (name, secret, description)
-        VALUES (
-            v_secret_name,
-            p_credentials::TEXT,
-            'Encrypted credentials for tenant ' || p_org_id::TEXT
-        )
-        RETURNING id INTO v_secret_id;
-    EXCEPTION WHEN undefined_table THEN
-        -- Try supabase_vault schema
-        INSERT INTO supabase_vault.secrets (name, secret, description)
-        VALUES (
-            v_secret_name,
-            p_credentials::TEXT,
-            'Encrypted credentials for tenant ' || p_org_id::TEXT
-        )
-        RETURNING id INTO v_secret_id;
-    END;
-    
-    RETURN v_secret_id;
-END;
-$$;
-
-
--- Function to retrieve tenant credentials from vault
-CREATE OR REPLACE FUNCTION private.get_tenant_credentials(
-    p_org_id UUID
-) RETURNS JSONB
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, supabase_vault, vault
-AS $$
-DECLARE
-    v_secret_name TEXT;
-    v_credentials TEXT;
-BEGIN
-    v_secret_name := 'tenant_creds_' || p_org_id::TEXT;
-    
-    -- Try vault schema first
-    BEGIN
-        SELECT decrypted_secret INTO v_credentials
-        FROM vault.decrypted_secrets
-        WHERE name = v_secret_name;
-    EXCEPTION WHEN undefined_table THEN
-        -- Try supabase_vault schema
-        SELECT decrypted_secret INTO v_credentials
-        FROM supabase_vault.decrypted_secrets
-        WHERE name = v_secret_name;
-    END;
-    
-    IF v_credentials IS NULL THEN
-        RETURN NULL;
-    END IF;
-    
-    RETURN v_credentials::JSONB;
-END;
-$$;
-
-
--- Function to delete tenant credentials from vault
-CREATE OR REPLACE FUNCTION private.delete_tenant_credentials(
-    p_org_id UUID
-) RETURNS BOOLEAN
-LANGUAGE plpgsql
-SECURITY DEFINER
-SET search_path = public, supabase_vault, vault
-AS $$
-DECLARE
-    v_secret_name TEXT;
-    v_deleted INTEGER;
-BEGIN
-    v_secret_name := 'tenant_creds_' || p_org_id::TEXT;
-    
-    -- Try vault schema first
-    BEGIN
-        DELETE FROM vault.secrets WHERE name = v_secret_name;
-        GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    EXCEPTION WHEN undefined_table THEN
-        -- Try supabase_vault schema
-        DELETE FROM supabase_vault.secrets WHERE name = v_secret_name;
-        GET DIAGNOSTICS v_deleted = ROW_COUNT;
-    END;
-    
-    RETURN v_deleted > 0;
-END;
-$$;
-
-
--- =============================================================================
 -- PROFILE SYNC FUNCTION FOR CLERK WEBHOOKS
 -- =============================================================================
 -- This function is called by the webhook handler when Clerk sends user updates
@@ -604,13 +484,29 @@ BEGIN
         updated_at = NOW()
     RETURNING id INTO v_profile_id;
     
-    -- Return the TEXT profile ID (Clerk user IDs are strings like 'user_xxxx')
     RETURN v_profile_id;
 END;
 $$;
 
 COMMENT ON FUNCTION fn_sync_clerk_user IS 
     'Syncs user profile data from Clerk webhooks. Called when user.created or user.updated events are received.';
+
+
+-- =============================================================================
+-- UPDATED TRIGGER FOR n8n_base_credentials
+-- =============================================================================
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_trigger 
+        WHERE tgname = 'update_n8n_base_credentials_updated_at'
+    ) THEN
+        CREATE TRIGGER update_n8n_base_credentials_updated_at
+            BEFORE UPDATE ON n8n_base_credentials
+            FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+    END IF;
+END $$;
 
 
 -- =============================================================================
@@ -629,12 +525,3 @@ GRANT EXECUTE ON FUNCTION fn_sync_clerk_user TO service_role;
 -- Grant access to n8n_base_credentials table
 GRANT SELECT ON n8n_base_credentials TO authenticated;
 GRANT ALL ON n8n_base_credentials TO service_role;
-
-
--- =============================================================================
--- UPDATED TRIGGER FOR n8n_base_credentials
--- =============================================================================
-
-CREATE TRIGGER update_n8n_base_credentials_updated_at
-    BEFORE UPDATE ON n8n_base_credentials
-    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

@@ -84,7 +84,7 @@ services:
       # Security
       - ENABLE_HMAC_VALIDATION=${ENABLE_HMAC_VALIDATION:-true}
       - ENABLE_FINGERPRINTING=true
-      - CORS_ORIGINS=http://localhost:3000,http://frontend:3000,http://localhost:8080
+      - CORS_ORIGINS=["*"]
       
       # Developer Mode (disable in production!)
       - DEV_SKIP_AUTH=${DEV_SKIP_AUTH:-false}

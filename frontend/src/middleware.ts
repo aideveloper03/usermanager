@@ -8,10 +8,20 @@ const isPublicRoute = createRouteMatcher([
 ]);
 
 export default clerkMiddleware(async (auth, req) => {
-  // For protected routes, require authentication
-  if (!isPublicRoute(req)) {
-    // Clerk v5+ uses async auth.protect()
-    await auth.protect();
+  // Public routes don't need authentication
+  if (isPublicRoute(req)) {
+    return;
+  }
+
+  // For protected routes, check authentication and redirect if needed
+  // This pattern works with all Clerk v5+ versions
+  const session = await auth();
+  
+  if (!session.userId) {
+    // Redirect unauthenticated users to sign-in
+    const signInUrl = new URL('/sign-in', req.url);
+    signInUrl.searchParams.set('redirect_url', req.url);
+    return Response.redirect(signInUrl);
   }
 });
 

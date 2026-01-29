@@ -1,13 +1,12 @@
 """
 Database service for Supabase operations.
 
-This module provides async database operations using supabase-py,
+This module provides database operations using supabase-py,
 following the principle of least privilege with RLS policies.
 """
 
 from typing import Any
 from uuid import UUID
-from functools import lru_cache
 
 import structlog
 from supabase import create_client, Client
@@ -22,20 +21,13 @@ logger = structlog.get_logger(__name__)
 
 class DatabaseService:
     """
-    Async database service for Supabase operations.
+    Database service for Supabase operations.
     
-    This service handles all database interactions with proper error handling,
-    logging, and respects RLS policies through service role authentication.
+    Handles all database interactions with proper error handling and logging.
+    Uses service role authentication for administrative operations.
     """
     
     def __init__(self, supabase_url: str, supabase_key: str):
-        """
-        Initialize the database service.
-        
-        Args:
-            supabase_url: Supabase project URL
-            supabase_key: Supabase service role key
-        """
         self.supabase_url = supabase_url
         self.supabase_key = supabase_key
         self._client: Client | None = None
@@ -60,15 +52,7 @@ class DatabaseService:
     # =========================================================================
     
     async def get_profile(self, profile_id: str) -> dict[str, Any] | None:
-        """
-        Get a profile by ID.
-        
-        Args:
-            profile_id: Clerk user ID
-            
-        Returns:
-            Profile data or None if not found
-        """
+        """Get a profile by ID (Clerk user ID)."""
         try:
             response = self.client.table("profiles").select("*").eq("id", profile_id).execute()
             return response.data[0] if response.data else None
@@ -77,15 +61,7 @@ class DatabaseService:
             raise
     
     async def create_profile(self, profile_data: dict[str, Any]) -> dict[str, Any]:
-        """
-        Create a new profile.
-        
-        Args:
-            profile_data: Profile data to insert
-            
-        Returns:
-            Created profile data
-        """
+        """Create a new profile."""
         try:
             response = self.client.table("profiles").insert(profile_data).execute()
             logger.info("profile_created", profile_id=profile_data.get("id"))
@@ -95,15 +71,7 @@ class DatabaseService:
             raise
     
     async def upsert_profile(self, profile_data: dict[str, Any]) -> dict[str, Any]:
-        """
-        Upsert a profile (create or update).
-        
-        Args:
-            profile_data: Profile data
-            
-        Returns:
-            Upserted profile data
-        """
+        """Upsert a profile (create or update)."""
         try:
             response = self.client.table("profiles").upsert(
                 profile_data,
@@ -163,19 +131,7 @@ class DatabaseService:
         plan_type: str = "free",
         initial_credits: int = 100
     ) -> dict[str, Any]:
-        """
-        Create a new organization with generated API credentials.
-        
-        Args:
-            name: Organization name
-            owner_id: Clerk user ID of the owner
-            tenant_id: Unique tenant identifier
-            plan_type: Subscription plan type
-            initial_credits: Starting credit balance
-            
-        Returns:
-            Organization data including API key (only returned once)
-        """
+        """Create a new organization with generated API credentials."""
         # Generate API key and client secret
         api_key, key_prefix, key_hash = api_key_manager.generate_api_key()
         client_secret, secret_hash = api_key_manager.generate_client_secret()
@@ -337,19 +293,7 @@ class DatabaseService:
         profile_id: str | None = None,
         metadata: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """
-        Deduct credits from an organization atomically.
-        
-        Args:
-            org_id: Organization UUID
-            amount: Credits to deduct
-            workflow_id: Optional workflow UUID
-            profile_id: Optional user profile ID
-            metadata: Optional request metadata
-            
-        Returns:
-            Dict with success, remaining_credits, usage_log_id, error_message
-        """
+        """Deduct credits from an organization atomically."""
         try:
             response = self.client.rpc(
                 "fn_deduct_credits",
@@ -529,17 +473,7 @@ class DatabaseService:
         org_id: UUID,
         credentials: dict[str, Any]
     ) -> str | None:
-        """
-        Store tenant credentials in Supabase Vault.
-        
-        Args:
-            org_id: Organization UUID
-            credentials: Credentials to store (encrypted at rest)
-                Format: {"service_type": {"api_key": "...", ...}, ...}
-            
-        Returns:
-            Secret ID or None on failure
-        """
+        """Store tenant credentials in Supabase Vault."""
         try:
             response = self.client.rpc(
                 "private.store_tenant_credentials",
@@ -557,24 +491,11 @@ class DatabaseService:
             
             return response.data if response.data else None
         except Exception as e:
-            logger.error(
-                "store_credentials_error",
-                org_id=str(org_id),
-                error=str(e)
-            )
+            logger.error("store_credentials_error", org_id=str(org_id), error=str(e))
             raise
     
     async def get_tenant_credentials(self, org_id: UUID) -> dict[str, Any] | None:
-        """
-        Retrieve tenant credentials from Supabase Vault.
-        
-        Args:
-            org_id: Organization UUID
-            
-        Returns:
-            Decrypted credentials dict by service type, or None
-            Format: {"openai": {"api_key": "sk-..."}, "slack": {...}, ...}
-        """
+        """Retrieve tenant credentials from Supabase Vault."""
         try:
             response = self.client.rpc(
                 "private.get_tenant_credentials",
@@ -583,11 +504,7 @@ class DatabaseService:
             
             return response.data if response.data else None
         except Exception as e:
-            logger.error(
-                "get_credentials_error",
-                org_id=str(org_id),
-                error=str(e)
-            )
+            logger.error("get_credentials_error", org_id=str(org_id), error=str(e))
             raise
     
     async def get_credentials_with_lock(
@@ -595,26 +512,7 @@ class DatabaseService:
         org_id: UUID,
         service_types: list[str] | None = None
     ) -> dict[str, Any] | None:
-        """
-        Retrieve tenant credentials with an advisory lock held.
-        
-        This method acquires a transaction-level advisory lock to prevent
-        credential bleed between concurrent requests for the same tenant.
-        The lock is released when the database transaction commits or rolls back.
-        
-        Args:
-            org_id: Organization UUID
-            service_types: Optional list of service types to retrieve
-                If None, returns all credentials for the tenant
-            
-        Returns:
-            Dict containing:
-                - credentials: The decrypted credentials by service type
-                - credential_mappings: Mapping of service types to n8n credential IDs
-            
-        Raises:
-            Exception if lock cannot be acquired (timeout)
-        """
+        """Retrieve tenant credentials with an advisory lock held."""
         try:
             response = self.client.rpc(
                 "fn_get_credentials_with_lock",
@@ -627,7 +525,6 @@ class DatabaseService:
             if not response.data:
                 return None
             
-            # Parse the response into a structured format
             credentials = {}
             mappings = {}
             
@@ -661,92 +558,7 @@ class DatabaseService:
             
             return response.data if response.data else False
         except Exception as e:
-            logger.error(
-                "delete_credentials_error",
-                org_id=str(org_id),
-                error=str(e)
-            )
-            raise
-    
-    # =========================================================================
-    # N8N BASE CREDENTIALS OPERATIONS
-    # =========================================================================
-    
-    async def get_n8n_base_credentials(
-        self,
-        service_types: list[str] | None = None
-    ) -> dict[str, str]:
-        """
-        Get the mapping of service types to n8n base credential IDs.
-        
-        Args:
-            service_types: Optional list of service types to filter
-            
-        Returns:
-            Dict mapping service types to n8n credential IDs
-            e.g., {"openai": "cred_123", "slack": "cred_456"}
-        """
-        try:
-            query = self.client.table("n8n_base_credentials").select(
-                "service_type, n8n_credential_id"
-            ).eq("is_active", True)
-            
-            if service_types:
-                query = query.in_("service_type", service_types)
-            
-            response = query.execute()
-            
-            return {
-                row["service_type"]: row["n8n_credential_id"]
-                for row in response.data
-            } if response.data else {}
-        except Exception as e:
-            logger.error("get_n8n_base_credentials_error", error=str(e))
-            raise
-    
-    async def upsert_n8n_base_credential(
-        self,
-        service_type: str,
-        n8n_credential_id: str,
-        description: str | None = None
-    ) -> dict[str, Any]:
-        """
-        Create or update an n8n base credential mapping.
-        
-        Args:
-            service_type: The service type (e.g., 'openai', 'slack')
-            n8n_credential_id: The credential ID in n8n
-            description: Optional description
-            
-        Returns:
-            The created/updated record
-        """
-        try:
-            data = {
-                "service_type": service_type,
-                "n8n_credential_id": n8n_credential_id,
-                "description": description,
-                "is_active": True
-            }
-            
-            response = self.client.table("n8n_base_credentials").upsert(
-                data,
-                on_conflict="service_type"
-            ).execute()
-            
-            logger.info(
-                "n8n_base_credential_upserted",
-                service_type=service_type,
-                n8n_credential_id=n8n_credential_id
-            )
-            
-            return response.data[0] if response.data else {}
-        except Exception as e:
-            logger.error(
-                "upsert_n8n_base_credential_error",
-                service_type=service_type,
-                error=str(e)
-            )
+            logger.error("delete_credentials_error", org_id=str(org_id), error=str(e))
             raise
 
 
@@ -758,12 +570,7 @@ _db_service: DatabaseService | None = None
 
 
 def get_db_service() -> DatabaseService:
-    """
-    Get the database service singleton.
-    
-    Returns:
-        DatabaseService instance
-    """
+    """Get the database service singleton."""
     global _db_service
     if _db_service is None:
         _db_service = DatabaseService(
@@ -771,3 +578,9 @@ def get_db_service() -> DatabaseService:
             supabase_key=settings.supabase_service_role_key
         )
     return _db_service
+
+
+def reset_db_service() -> None:
+    """Reset the database service singleton. Useful for testing."""
+    global _db_service
+    _db_service = None
