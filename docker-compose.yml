@@ -6,43 +6,40 @@
 # Usage:
 #   Development: docker compose up -d
 #   Production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-#
-# NOTE: Frontend is temporarily disabled. To enable, uncomment the frontend service.
 
 version: '3.8'
 
 services:
   # ---------------------------------------------------------------------------
-  # Frontend UI (Next.js with Clerk) - TEMPORARILY DISABLED
+  # Frontend UI (Next.js with Clerk)
   # ---------------------------------------------------------------------------
-  # Uncomment to enable frontend build:
-  # frontend:
-  #   build:
-  #     context: ./frontend
-  #     dockerfile: Dockerfile
-  #     args:
-  #       - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
-  #       - NEXT_PUBLIC_GATEWAY_URL=http://gateway:8000
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - NODE_ENV=production
-  #     - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
-  #     - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
-  #     - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
-  #     - NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
-  #     - NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
-  #     - NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
-  #     - NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
-  #   depends_on:
-  #     - gateway
-  #   networks:
-  #     - gateway-network
-  #   healthcheck:
-  #     test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+        - NEXT_PUBLIC_GATEWAY_URL=http://gateway:8000
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
+      - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
+      - NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+      - NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
+      - NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
+    depends_on:
+      - gateway
+    networks:
+      - gateway-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   # ---------------------------------------------------------------------------
   # Gateway API (FastAPI)
@@ -87,7 +84,7 @@ services:
       # Security
       - ENABLE_HMAC_VALIDATION=${ENABLE_HMAC_VALIDATION:-true}
       - ENABLE_FINGERPRINTING=true
-      - CORS_ORIGINS=http://localhost:3000,http://frontend:3000,http://localhost:8080
+      - CORS_ORIGINS=["*"]
       
       # Developer Mode (disable in production!)
       - DEV_SKIP_AUTH=${DEV_SKIP_AUTH:-false}
