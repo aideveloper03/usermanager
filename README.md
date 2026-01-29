@@ -1,60 +1,60 @@
 # N8N Orchestration Gateway
 
-A production-ready, multi-tenant API gateway for orchestrating n8n workflows with enterprise-grade security, credit-based billing, and dynamic credential injection.
+A production-ready, multi-tenant API gateway for private n8n instances. This gateway provides secure authentication, credit-based billing, and workflow orchestration.
 
 ## Overview
 
-The N8N Orchestration Gateway provides a secure wrapper around private n8n instances, enabling:
+The N8N Orchestration Gateway acts as a secure proxy between your applications and private n8n instances. It handles:
 
-- **Multi-tenant Architecture**: Organizations with isolated API keys, credentials, and billing
-- **Credit-based Billing**: Pay-per-execution model with atomic credit deduction
-- **Secure Authentication**: Clerk JWT validation with native Supabase integration
-- **Dynamic Credential Injection**: Tenant-specific secrets from Supabase Vault
-- **Anti-Hijacking Protection**: HMAC signature validation and request fingerprinting
-- **Developer Mode**: Auth bypass for local development and testing
+- **Authentication**: Clerk JWT and API key authentication
+- **Authorization**: Multi-tenant organization-based access control
+- **Billing**: Credit-based pay-per-execution model
+- **Security**: HMAC signature validation, request fingerprinting
+- **Credential Management**: Secure tenant credential storage in Supabase Vault
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│   Frontend UI   │────▶│  Gateway API     │────▶│  n8n Instance   │
-│   (Next.js +    │     │  (FastAPI)       │     │  (Workflows)    │
-│    Clerk)       │     │                  │     │                 │
-└─────────────────┘     └────────┬─────────┘     └─────────────────┘
-                                 │
-                    ┌────────────┴────────────┐
-                    │                         │
-              ┌─────▼─────┐           ┌───────▼───────┐
-              │  Supabase │           │    Redis      │
-              │  (DB +    │           │  (Rate Limit) │
-              │   Vault)  │           │               │
-              └───────────┘           └───────────────┘
+┌─────────────┐     ┌─────────────────────┐     ┌─────────────┐
+│   Client    │────▶│  Gateway (FastAPI)  │────▶│    n8n      │
+│  (Frontend) │     │                     │     │  Instance   │
+└─────────────┘     │  - Auth Middleware  │     └─────────────┘
+                    │  - Rate Limiting    │
+                    │  - Credit Deduction │
+                    │  - Logging          │
+                    └─────────┬───────────┘
+                              │
+                    ┌─────────▼───────────┐
+                    │      Supabase       │
+                    │  - User Profiles    │
+                    │  - Organizations    │
+                    │  - Workflows        │
+                    │  - Usage Logs       │
+                    │  - Credentials Vault│
+                    └─────────────────────┘
 ```
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker and Docker Compose
-- Node.js 18+ (for frontend development)
-- Python 3.12+ (for backend development)
-- Supabase account
+- Python 3.12+
+- Docker & Docker Compose
+- Supabase project
 - Clerk account
 - n8n instance
 
 ### 1. Clone and Setup
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd n8n-orchestration-gateway
+git clone <repository>
+cd n8n-gateway
 
-# Copy environment files
+# Copy environment template
 cp .env.example .env
-cp frontend/.env.example frontend/.env.local
 ```
 
-### 2. Configure Environment Variables
+### 2. Configure Environment
 
 Edit `.env` with your credentials:
 
@@ -73,11 +73,14 @@ CLERK_JWKS_URL=https://your-instance.clerk.accounts.dev/.well-known/jwks.json
 # n8n
 N8N_BASE_URL=https://your-n8n-instance.com
 N8N_INTERNAL_AUTH_SECRET=your-64-character-secret
+
+# Redis (for rate limiting)
+REDIS_URL=redis://localhost:6379/0
 ```
 
-### 3. Apply Database Migrations
+### 3. Setup Database
 
-Run the SQL migrations in your Supabase dashboard:
+Run the Supabase migrations in order:
 
 ```bash
 # In Supabase SQL Editor, run:
@@ -85,116 +88,358 @@ Run the SQL migrations in your Supabase dashboard:
 # 2. supabase/migrations/02_clerk_native_integration.sql
 ```
 
-### 4. Start Services
+### 4. Run with Docker Compose
 
 ```bash
-# Development mode (with Docker)
 docker compose up -d
-
-# Or run locally
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8000
 ```
 
-### 5. Access the UI
+The gateway will be available at `http://localhost:8000`.
 
-- Frontend: http://localhost:3000
-- API Docs: http://localhost:8000/docs
-- Health Check: http://localhost:8000/api/v1/health
-
-## Development
-
-### Developer Bypass Mode
-
-For local development without Clerk authentication:
+### 5. Test the API
 
 ```bash
-# Set in .env
-DEV_SKIP_AUTH=true
-DEV_DEFAULT_USER_ID=dev_user_001
-DEV_DEFAULT_ORG_ID=dev_org_001
+# Health check
+curl http://localhost:8000/api/v1/health
+
+# With authentication (requires valid Clerk JWT)
+curl -H "Authorization: Bearer <token>" \
+     http://localhost:8000/api/v1/organizations
 ```
 
-Then use headers to mock authentication:
+## API Reference
+
+### Authentication
+
+The gateway supports two authentication methods:
+
+#### JWT Authentication (Recommended)
+
+Include a Clerk JWT token in the Authorization header:
+
+```http
+Authorization: Bearer <clerk-jwt-token>
+```
+
+#### API Key Authentication
+
+Include your organization's API key:
+
+```http
+X-API-Key: gw_live_xxxxx
+X-Tenant-ID: your-tenant-id
+X-Timestamp: <unix-timestamp>
+X-Signature: <hmac-signature>
+```
+
+### Endpoints
+
+#### Health Checks
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/v1/health` | Basic health check |
+| GET | `/api/v1/health/ready` | Readiness check (all dependencies) |
+| GET | `/api/v1/health/live` | Liveness probe |
+
+#### Organizations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/organizations` | Create organization |
+| GET | `/api/v1/organizations` | List my organizations |
+| GET | `/api/v1/organizations/{id}` | Get organization |
+| PATCH | `/api/v1/organizations/{id}` | Update organization |
+| POST | `/api/v1/organizations/{id}/credentials` | Store credentials |
+| DELETE | `/api/v1/organizations/{id}/credentials` | Delete credentials |
+
+#### Workflows
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/workflows` | Register workflow |
+| GET | `/api/v1/workflows` | List workflows |
+| GET | `/api/v1/workflows/{id}` | Get workflow |
+| PATCH | `/api/v1/workflows/{id}` | Update workflow |
+| POST | `/api/v1/workflows/{id}/activate` | Activate workflow |
+| POST | `/api/v1/workflows/{id}/deactivate` | Deactivate workflow |
+
+#### Execution
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/v1/execute` | Execute workflow |
+| POST | `/api/v1/execute/stream` | Execute with streaming |
+
+### Execute Workflow
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/execute \
-  -H "X-Dev-User-ID: test_user" \
-  -H "X-Dev-Org-ID: test_org" \
+  -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"workflow_id": "xxx", "data": {}}'
+  -d '{
+    "workflow_id": "uuid-of-workflow",
+    "data": {
+      "input": "your data here"
+    },
+    "metadata": {
+      "source": "my-app"
+    }
+  }'
 ```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "execution_id": "uuid",
+  "status": "completed",
+  "data": { "result": "..." },
+  "credits_used": 1,
+  "credits_remaining": 99,
+  "execution_time_ms": 150
+}
+```
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SUPABASE_URL` | Yes | - | Supabase project URL |
+| `SUPABASE_ANON_KEY` | Yes | - | Supabase anonymous key |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | - | Supabase service role key |
+| `CLERK_SECRET_KEY` | Yes | - | Clerk secret key |
+| `CLERK_PUBLISHABLE_KEY` | Yes | - | Clerk publishable key |
+| `CLERK_JWT_ISSUER` | Yes | - | Clerk JWT issuer URL |
+| `CLERK_JWKS_URL` | Yes | - | Clerk JWKS URL |
+| `N8N_BASE_URL` | Yes | - | n8n instance base URL |
+| `N8N_INTERNAL_AUTH_SECRET` | Yes | - | Secret for n8n internal auth (64+ chars) |
+| `N8N_API_KEY` | No | - | n8n API key for credential injection |
+| `REDIS_URL` | No | `redis://localhost:6379/0` | Redis URL for rate limiting |
+| `ENABLE_RATE_LIMITING` | No | `true` | Enable rate limiting |
+| `ENABLE_HMAC_VALIDATION` | No | `true` | Enable HMAC validation |
+| `ENABLE_FINGERPRINTING` | No | `true` | Enable request fingerprinting |
+| `DEV_SKIP_AUTH` | No | `false` | Skip auth in development |
+| `ENVIRONMENT` | No | `production` | Environment name |
+| `LOG_LEVEL` | No | `INFO` | Logging level |
+| `CORS_ORIGINS` | No | - | Comma-separated allowed origins |
+
+### Rate Limiting
+
+Default rate limit: 100 requests per 60 seconds per tenant.
+
+Configure with:
+- `RATE_LIMIT_REQUESTS`: Requests per period
+- `RATE_LIMIT_PERIOD`: Period in seconds
+
+### Security Settings
+
+| Setting | Description |
+|---------|-------------|
+| `HMAC_TIMESTAMP_TOLERANCE` | HMAC signature validity window (default: 300s) |
+| `TRUSTED_PROXIES` | Comma-separated proxy IPs for correct client IP |
+
+## Clerk + Supabase Integration
+
+This gateway uses Clerk's native Supabase integration. The setup involves:
+
+1. **Enable Clerk as Supabase Third-Party Auth Provider**
+   - In Clerk Dashboard: Configure Supabase integration
+   - In Supabase Dashboard: Add Clerk as auth provider
+
+2. **JWT Claims**
+   - The Clerk JWT includes `sub` (user ID) and `org_id` (organization ID)
+   - Supabase RLS policies use `auth.jwt()->>'sub'` to get the user
+
+3. **RLS Policies**
+   - Profiles: Users can read/update their own profile
+   - Organizations: Members can read, admins can update
+   - Workflows: Members can read, admins can manage
+   - Usage Logs: Members can read
+
+## Development
+
+### Local Development
+
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run with dev settings
+ENVIRONMENT=development DEV_SKIP_AUTH=true python -m app.main
+```
+
+### Developer Bypass Mode
+
+For local testing without valid Clerk tokens:
+
+```bash
+# Set environment
+DEV_SKIP_AUTH=true
+ENVIRONMENT=development
+
+# Use headers to mock authentication
+curl -X GET http://localhost:8000/api/v1/organizations \
+  -H "X-Dev-User-ID: test_user" \
+  -H "X-Dev-Org-ID: test_org"
+```
+
+**Warning**: Never enable `DEV_SKIP_AUTH` in production!
 
 ### Running Tests
 
 ```bash
-# Unit tests
-pytest tests/ -v
+# Run all tests
+pytest
 
-# End-to-end tests (with dev bypass)
-python tests/local_test.py
+# Run with coverage
+pytest --cov=app --cov-report=html
 
-# Specific test
-python tests/local_test.py --test test_health_check
+# Run specific tests
+pytest tests/test_health.py -v
 ```
 
-## Documentation
+### Code Quality
 
-- [API Reference](docs/API_REFERENCE.md) - Complete API documentation
-- [Supabase Setup](docs/SUPABASE_SETUP.md) - Database configuration guide
-- [n8n Setup](docs/N8N_SETUP.md) - n8n integration guide
-- [Clerk Integration](docs/CLERK_INTEGRATION.md) - Authentication setup
-- [Code Structure](docs/CODE_STRUCTURE.md) - Architecture overview
-- [Workflow Guide](docs/WORKFLOW_GUIDE.md) - Workflow creation guide
+```bash
+# Linting
+ruff check app/
 
-## Security
+# Type checking
+mypy app/
 
-### Authentication Methods
-
-1. **Clerk JWT** (recommended for user-facing applications)
-   ```bash
-   Authorization: Bearer <clerk-jwt-token>
-   ```
-
-2. **API Key** (for server-to-server communication)
-   ```bash
-   X-API-Key: gw_live_xxxx
-   X-Timestamp: <unix-timestamp>
-   X-Signature: <hmac-sha256-signature>
-   ```
-
-### HMAC Signature
-
-For API key authentication, compute HMAC-SHA256:
+# Format code
+ruff format app/
 ```
-signature = HMAC-SHA256(client_secret, timestamp + request_body)
-```
-
-### Dynamic Credentials
-
-Tenant credentials are stored in Supabase Vault and injected at runtime:
-
-1. **Simple Injection**: Credentials passed in webhook payload
-2. **Dynamic Injection**: Credentials patched into n8n via REST API with advisory locks
 
 ## Project Structure
 
 ```
-.
-├── app/                    # FastAPI backend
-│   ├── api/v1/            # API routes
-│   ├── core/              # Config, security, rate limiting
-│   ├── middleware/        # Auth, HMAC, fingerprinting
-│   ├── models/            # Pydantic schemas
-│   └── services/          # Database, n8n client
-├── frontend/              # Next.js frontend
-│   └── src/
-│       ├── app/           # Pages and layouts
-│       └── components/    # React components
+n8n-gateway/
+├── app/
+│   ├── api/
+│   │   └── v1/
+│   │       ├── endpoints/
+│   │       │   ├── execute.py      # Workflow execution
+│   │       │   ├── health.py       # Health checks
+│   │       │   ├── internal.py     # n8n callbacks
+│   │       │   ├── organizations.py
+│   │       │   └── workflows.py
+│   │       └── __init__.py         # Router setup
+│   ├── core/
+│   │   ├── config.py               # Settings management
+│   │   ├── rate_limiter.py         # Rate limiting
+│   │   └── security.py             # Security utilities
+│   ├── middleware/
+│   │   └── auth_middleware.py      # Authentication
+│   ├── models/
+│   │   └── schemas.py              # Pydantic models
+│   ├── services/
+│   │   ├── database.py             # Supabase operations
+│   │   └── n8n_client.py           # n8n HTTP client
+│   └── main.py                     # Application entry
+├── frontend/                       # Next.js frontend
 ├── supabase/
-│   └── migrations/        # SQL migrations
-├── tests/                 # Test suite
-└── docs/                  # Documentation
+│   └── migrations/                 # Database migrations
+├── tests/                          # Test suite
+├── docker-compose.yml
+├── Dockerfile
+├── requirements.txt
+└── README.md
+```
+
+## Security Considerations
+
+### Production Checklist
+
+- [ ] Set `ENVIRONMENT=production`
+- [ ] Set `DEBUG=false`
+- [ ] Set `DEV_SKIP_AUTH=false`
+- [ ] Use 64+ character `N8N_INTERNAL_AUTH_SECRET`
+- [ ] Configure `CORS_ORIGINS` explicitly
+- [ ] Enable rate limiting
+- [ ] Enable HMAC validation
+- [ ] Use HTTPS for all endpoints
+- [ ] Rotate API keys periodically
+- [ ] Monitor security logs
+
+### HMAC Signature Validation
+
+For API key authentication, requests should include:
+
+```javascript
+const crypto = require('crypto');
+
+const timestamp = Math.floor(Date.now() / 1000).toString();
+const body = JSON.stringify(requestBody);
+const signature = crypto
+  .createHmac('sha256', clientSecret)
+  .update(timestamp + body)
+  .digest('hex');
+
+headers = {
+  'X-API-Key': apiKey,
+  'X-Timestamp': timestamp,
+  'X-Signature': signature,
+  'X-Tenant-ID': tenantId
+};
+```
+
+### Request Fingerprinting
+
+The gateway creates fingerprints from:
+- Client IP address
+- User-Agent header
+- Tenant ID
+
+This helps detect suspicious activity like token theft.
+
+## Troubleshooting
+
+### Common Issues
+
+**1. JWT Verification Failed**
+- Check `CLERK_JWT_ISSUER` matches your Clerk instance
+- Verify `CLERK_JWKS_URL` is accessible
+- Ensure token hasn't expired
+
+**2. Organization Not Found**
+- User must be a member of the organization
+- Check organization is active (`is_active=true`)
+
+**3. Insufficient Credits**
+- Organization needs credits to execute workflows
+- Add credits via the API or admin panel
+
+**4. n8n Connection Failed**
+- Verify `N8N_BASE_URL` is correct
+- Check n8n instance is running
+- Ensure `N8N_INTERNAL_AUTH_SECRET` matches n8n config
+
+### Debug Mode
+
+Enable detailed logging:
+
+```bash
+LOG_LEVEL=DEBUG
+LOG_FORMAT=text
+```
+
+### Health Check
+
+```bash
+# Basic health
+curl http://localhost:8000/api/v1/health
+
+# Detailed readiness (checks all dependencies)
+curl http://localhost:8000/api/v1/health/ready
 ```
 
 ## Contributing
@@ -202,9 +447,17 @@ Tenant credentials are stored in Supabase Vault and injected at runtime:
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Run tests: `pytest tests/ -v`
-5. Submit a pull request
+4. Run tests: `pytest`
+5. Run linting: `ruff check app/`
+6. Submit a pull request
 
 ## License
 
 MIT License - see LICENSE file for details.
+
+## Support
+
+For issues and questions:
+- Open a GitHub issue
+- Check existing documentation in `/docs`
+- Review the API documentation at `/docs` (when running locally)

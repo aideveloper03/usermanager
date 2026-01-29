@@ -88,4 +88,7 @@ strict = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --cov=app --cov-report=term-missing"
+addopts = "-v"
+filterwarnings = [
+    "ignore::DeprecationWarning:pyiceberg.*"
+]
