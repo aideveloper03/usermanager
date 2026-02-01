@@ -1,15 +1,24 @@
 # N8N Orchestration Gateway
 
-A production-ready, multi-tenant API gateway for private n8n instances. This gateway provides secure authentication, credit-based billing, and workflow orchestration.
+A production-ready, multi-tenant API gateway for private n8n instances. This gateway provides secure authentication, credit-based billing, and workflow orchestration using **Clerk Native Supabase Integration**.
+
+## Version 1.1.0 - Native Clerk Integration
+
+This version implements Clerk's native third-party auth provider integration with Supabase, providing:
+
+- **Defense in Depth**: JWT validated by both Python gateway AND Supabase
+- **Row-Level Security**: RLS policies enforced using `auth.jwt()->>'sub'` from Clerk tokens
+- **Per-Request Authentication**: Authenticated Supabase clients with proper user context
+- **Upgraded Dependencies**: supabase>=2.11.0, httpx>=0.28.0
 
 ## Overview
 
 The N8N Orchestration Gateway acts as a secure proxy between your applications and private n8n instances. It handles:
 
-- **Authentication**: Clerk JWT and API key authentication
-- **Authorization**: Multi-tenant organization-based access control
-- **Billing**: Credit-based pay-per-execution model
-- **Security**: HMAC signature validation, request fingerprinting
+- **Authentication**: Clerk JWT (with native Supabase RLS) and API key authentication
+- **Authorization**: Multi-tenant organization-based access control with PostgreSQL RLS
+- **Billing**: Credit-based pay-per-execution model with atomic transactions
+- **Security**: HMAC signature validation, request fingerprinting, defense in depth
 - **Credential Management**: Secure tenant credential storage in Supabase Vault
 
 ## Architecture
@@ -86,9 +95,30 @@ Run the Supabase migrations in order:
 # In Supabase SQL Editor, run:
 # 1. supabase/migrations/01_initial_schema.sql
 # 2. supabase/migrations/02_clerk_native_integration.sql
+# 3. supabase/migrations/03_clerk_third_party_auth.sql
 ```
 
-### 4. Run with Docker Compose
+### 4. Configure Clerk as Supabase Third-Party Auth Provider
+
+**This step is CRITICAL for the Clerk-Supabase integration to work.**
+
+1. **In Clerk Dashboard**:
+   - Go to **Integrations** → **Supabase**
+   - Copy your Clerk **Issuer URL** (e.g., `https://xxx.clerk.accounts.dev`)
+   - Note your **JWKS URL** (e.g., `https://xxx.clerk.accounts.dev/.well-known/jwks.json`)
+
+2. **In Supabase Dashboard**:
+   - Go to **Authentication** → **Providers**
+   - Scroll to **Third-party Auth Providers**
+   - Enable and configure:
+     - **Auth Provider**: Clerk
+     - **JWKS URL**: Your Clerk JWKS URL
+     - **JWT Issuer**: Your Clerk issuer URL
+
+This enables Supabase to validate Clerk JWTs directly and enforce RLS policies
+using `auth.jwt()->>'sub'` to get the Clerk user ID.
+
+### 5. Run with Docker Compose
 
 ```bash
 docker compose up -d
@@ -96,7 +126,7 @@ docker compose up -d
 
 The gateway will be available at `http://localhost:8000`.
 
-### 5. Test the API
+### 6. Test the API
 
 ```bash
 # Health check
@@ -242,23 +272,93 @@ Configure with:
 | `HMAC_TIMESTAMP_TOLERANCE` | HMAC signature validity window (default: 300s) |
 | `TRUSTED_PROXIES` | Comma-separated proxy IPs for correct client IP |
 
-## Clerk + Supabase Integration
+## Clerk + Supabase Native Integration
 
-This gateway uses Clerk's native Supabase integration. The setup involves:
+This gateway uses Clerk's **native third-party auth provider** integration with Supabase. This is the recommended approach (not the deprecated JWT template method).
 
-1. **Enable Clerk as Supabase Third-Party Auth Provider**
-   - In Clerk Dashboard: Configure Supabase integration
-   - In Supabase Dashboard: Add Clerk as auth provider
+### Architecture
 
-2. **JWT Claims**
-   - The Clerk JWT includes `sub` (user ID) and `org_id` (organization ID)
-   - Supabase RLS policies use `auth.jwt()->>'sub'` to get the user
+```
+┌─────────────┐     ┌─────────────────────┐     ┌─────────────┐
+│   Client    │────▶│  Gateway (Python)   │────▶│  Supabase   │
+│             │     │  Validates JWT      │     │  Also       │
+│  (Clerk     │     │  via Clerk JWKS     │     │  Validates  │
+│   Session)  │     └──────────┬──────────┘     │  JWT via    │
+└─────────────┘                │                │  Clerk JWKS │
+                               │ Same JWT       │  + RLS      │
+                               └───────────────▶│             │
+                                                └─────────────┘
+```
 
-3. **RLS Policies**
-   - Profiles: Users can read/update their own profile
-   - Organizations: Members can read, admins can update
-   - Workflows: Members can read, admins can manage
-   - Usage Logs: Members can read
+### How It Works
+
+1. **Client** authenticates with Clerk and gets a session token (JWT)
+2. **Gateway** receives the JWT in the `Authorization: Bearer <token>` header
+3. **Gateway** validates the JWT against Clerk's JWKS endpoint
+4. **Gateway** creates a Supabase client passing the same JWT
+5. **Supabase** validates the JWT again (defense in depth)
+6. **RLS policies** use `auth.jwt()->>'sub'` to get the Clerk user ID
+
+### Database Clients
+
+The gateway uses two types of Supabase clients:
+
+```python
+# 1. Service Role Client (admin operations, bypasses RLS)
+db = get_db_service()
+
+# 2. Authenticated Client (user operations, enforces RLS)  
+db = get_authenticated_db_service(clerk_jwt, user_id)
+```
+
+| Client Type | Use Case | RLS | When to Use |
+|-------------|----------|-----|-------------|
+| Service Role | Background jobs, webhooks, admin | Bypassed | Credit deduction, logging |
+| Authenticated | User-initiated requests | Enforced | Reading user/org data |
+
+### JWT Claims Available in RLS
+
+```sql
+-- Get Clerk user ID
+auth.jwt()->>'sub'         -- Returns: user_xxx
+
+-- Get organization ID
+auth.jwt()->>'org_id'      -- Returns: org_xxx (if in org context)
+
+-- Get organization role
+auth.jwt()->>'org_role'    -- Returns: admin, member, etc.
+
+-- Get email
+auth.jwt()->>'email'       -- Returns: user@example.com
+```
+
+### RLS Policy Examples
+
+```sql
+-- Users can only read their own profile
+CREATE POLICY "profiles_select_own" ON profiles
+    FOR SELECT
+    USING (id = (auth.jwt()->>'sub'));
+
+-- Members can read their organization's workflows
+CREATE POLICY "workflows_select_member" ON workflows
+    FOR SELECT
+    USING (
+        EXISTS (
+            SELECT 1 FROM organization_members
+            WHERE organization_id = workflows.organization_id
+            AND profile_id = (auth.jwt()->>'sub')
+        )
+    );
+```
+
+### Setup Checklist
+
+- [ ] Run all migrations (01, 02, 03)
+- [ ] Configure Clerk integration in Clerk Dashboard
+- [ ] Add Clerk as third-party auth provider in Supabase Dashboard
+- [ ] Set `CLERK_JWKS_URL` and `CLERK_JWT_ISSUER` in environment
+- [ ] Set both `SUPABASE_ANON_KEY` and `SUPABASE_SERVICE_ROLE_KEY`
 
 ## Development
 
