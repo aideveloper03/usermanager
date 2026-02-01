@@ -1,11 +1,22 @@
 """
-Authentication and Security Middleware.
+Authentication and Security Middleware with Clerk-Supabase Native Integration.
 
-Provides:
-- JWT authentication via Clerk
-- API key authentication
-- Developer bypass mode for testing
-- Request fingerprinting
+This module provides:
+- JWT authentication via Clerk with token storage for Supabase RLS
+- API key authentication for machine-to-machine requests
+- Developer bypass mode for local testing
+- Request fingerprinting and security logging
+
+Architecture:
+    The middleware validates the Clerk JWT and stores it in request.state.
+    The stored JWT is then used to create authenticated Supabase clients
+    that respect RLS policies based on auth.jwt()->>'sub'.
+
+Session Flow:
+    1. Extract Bearer token from Authorization header
+    2. Validate JWT against Clerk's JWKS
+    3. Store validated JWT + claims in request.state
+    4. Downstream code uses get_authenticated_db_service() for RLS-enabled queries
 """
 
 import time
@@ -13,7 +24,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 import structlog
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
@@ -30,6 +41,23 @@ logger = structlog.get_logger(__name__)
 
 
 # =============================================================================
+# REQUEST STATE KEYS
+# =============================================================================
+# These keys are used to store authentication context in request.state
+
+STATE_USER_ID = "user_id"
+STATE_ORG_ID = "org_id"
+STATE_TENANT_ID = "tenant_id"
+STATE_JWT_CLAIMS = "jwt_claims"
+STATE_CLERK_JWT = "clerk_jwt"  # Raw JWT token for Supabase client
+STATE_FINGERPRINT = "fingerprint"
+STATE_REQUEST_ID = "request_id"
+STATE_AUTH_METHOD = "auth_method"
+STATE_IP_ADDRESS = "ip_address"
+STATE_USER_AGENT = "user_agent"
+
+
+# =============================================================================
 # DEVELOPER BYPASS MODE
 # =============================================================================
 
@@ -39,6 +67,10 @@ class DevBypassAuth:
     Developer authentication bypass for testing.
     
     SECURITY WARNING: Never enable in production!
+    
+    When enabled, this bypasses all authentication and uses mock
+    user/org IDs from headers or defaults. A mock JWT is generated
+    for Supabase client compatibility.
     """
     
     DEV_USER_ID_HEADER = "X-Dev-User-ID"
@@ -73,19 +105,16 @@ class DevBypassAuth:
             "exp": int(time.time()) + 3600,
             "dev_bypass": True,
         }
-
-
-# =============================================================================
-# REQUEST STATE KEYS
-# =============================================================================
-
-STATE_USER_ID = "user_id"
-STATE_ORG_ID = "org_id"
-STATE_TENANT_ID = "tenant_id"
-STATE_JWT_CLAIMS = "jwt_claims"
-STATE_FINGERPRINT = "fingerprint"
-STATE_REQUEST_ID = "request_id"
-STATE_AUTH_METHOD = "auth_method"
+    
+    @classmethod
+    def get_mock_jwt(cls) -> str:
+        """
+        Return a mock JWT for development mode.
+        
+        This is NOT a valid JWT - it's a marker that tells the database
+        service to use service role access in development mode.
+        """
+        return "dev_bypass_mock_jwt_token"
 
 
 # =============================================================================
@@ -94,7 +123,7 @@ STATE_AUTH_METHOD = "auth_method"
 
 
 def get_client_ip(request: Request) -> str:
-    """Extract the real client IP address."""
+    """Extract the real client IP address from headers or socket."""
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
         ips = [ip.strip() for ip in forwarded_for.split(",")]
@@ -118,7 +147,14 @@ def get_user_agent(request: Request) -> str:
 
 
 def is_public_path(path: str) -> bool:
-    """Check if the path is publicly accessible."""
+    """
+    Check if the path is publicly accessible (no auth required).
+    
+    Public paths include:
+    - Health check endpoints
+    - API documentation (in development)
+    - Internal webhook callbacks from n8n
+    """
     public_paths = {
         "/",
         "/docs",
@@ -128,6 +164,7 @@ def is_public_path(path: str) -> bool:
         "/api/v1/internal/update-status",
     }
     
+    # Health endpoints
     if path.startswith("/api/v1/health"):
         return True
     
@@ -146,6 +183,14 @@ def is_public_path(path: str) -> bool:
 class AuthMiddleware(BaseHTTPMiddleware):
     """
     Authentication middleware for validating JWTs and API keys.
+    
+    This middleware:
+    1. Validates the authentication credentials
+    2. Stores the validated JWT token in request.state for Supabase RLS
+    3. Extracts user and organization context from claims
+    
+    The stored JWT (request.state.clerk_jwt) is used by AuthenticatedDatabaseService
+    to create Supabase clients that respect RLS policies.
     """
     
     def __init__(self, app: ASGIApp):
@@ -159,7 +204,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Any]
     ) -> Response:
         """Process the request through authentication."""
-        # Generate request ID
+        # Generate request ID for tracing
         request_id = str(uuid4())
         request.state.request_id = request_id
         
@@ -171,7 +216,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if DevBypassAuth.is_enabled():
             return await self._authenticate_dev_bypass(request, call_next)
         
-        # Try JWT authentication first
+        # Try JWT authentication first (preferred)
         auth_header = request.headers.get("Authorization")
         api_key = request.headers.get("X-API-Key")
         
@@ -190,12 +235,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
         request: Request,
         call_next: Callable[[Request], Any]
     ) -> Response:
-        """Authenticate using developer bypass mode."""
+        """Authenticate using developer bypass mode (development only)."""
         mock_claims = DevBypassAuth.get_mock_claims(request)
         
+        # Store authentication context
         request.state.user_id = mock_claims["sub"]
         request.state.org_id = mock_claims.get("org_id")
         request.state.jwt_claims = mock_claims
+        request.state.clerk_jwt = DevBypassAuth.get_mock_jwt()  # Mock JWT marker
         request.state.auth_method = "dev_bypass"
         
         logger.warning(
@@ -214,16 +261,25 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Any],
         token: str
     ) -> Response:
-        """Authenticate using JWT token."""
+        """
+        Authenticate using Clerk JWT token.
+        
+        The validated token is stored in request.state.clerk_jwt for
+        creating authenticated Supabase clients with RLS support.
+        """
         try:
+            # Validate JWT against Clerk's JWKS
             claims = await self.jwt_verifier.verify_token(token)
             
+            # Extract user and organization context
             user_id = self.jwt_verifier.get_user_id_from_claims(claims)
             org_id = self.jwt_verifier.get_org_id_from_claims(claims)
             
+            # Store authentication context in request state
             request.state.user_id = user_id
             request.state.org_id = org_id
             request.state.jwt_claims = claims
+            request.state.clerk_jwt = token  # CRITICAL: Store raw JWT for Supabase
             request.state.auth_method = "jwt"
             
             logger.debug(
@@ -253,7 +309,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
         call_next: Callable[[Request], Any],
         api_key: str
     ) -> Response:
-        """Authenticate using API key."""
+        """
+        Authenticate using API key.
+        
+        API key authentication does NOT provide a Clerk JWT, so the
+        database service will use service role access (no RLS).
+        This is appropriate for machine-to-machine API calls.
+        """
         if not api_key.startswith(("gw_live_", "gw_test_")):
             return self._unauthorized_response(
                 "Invalid API key format",
@@ -261,9 +323,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             )
         
         key_prefix = self.api_key_manager.extract_prefix(api_key)
+        
+        # Store API key info (full validation happens in endpoint)
         request.state.api_key_prefix = key_prefix
         request.state.api_key_full = api_key
         request.state.auth_method = "api_key"
+        request.state.clerk_jwt = None  # No JWT for API key auth
         
         logger.debug(
             "api_key_auth_pending",
@@ -304,6 +369,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 class SecurityMiddleware(BaseHTTPMiddleware):
     """
     Security middleware for fingerprinting and request logging.
+    
+    Runs after authentication to add:
+    - Request fingerprinting for anomaly detection
+    - Request timing and logging
+    - IP and User-Agent extraction
     """
     
     def __init__(self, app: ASGIApp):
@@ -321,11 +391,15 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         
         request_id = getattr(request.state, STATE_REQUEST_ID, str(uuid4()))
         
-        # Fingerprinting
+        # Extract IP and User-Agent
+        request.state.ip_address = get_client_ip(request)
+        request.state.user_agent = get_user_agent(request)
+        
+        # Generate fingerprint
         if settings.enable_fingerprinting:
             await self._process_fingerprint(request)
         
-        # Request logging
+        # Request logging with timing
         if settings.enable_request_logging:
             start_time = time.time()
             response = await call_next(request)
@@ -340,6 +414,7 @@ class SecurityMiddleware(BaseHTTPMiddleware):
                 duration_ms=duration_ms,
                 user_id=getattr(request.state, STATE_USER_ID, None),
                 org_id=getattr(request.state, STATE_ORG_ID, None),
+                auth_method=getattr(request.state, STATE_AUTH_METHOD, None),
             )
             
             return response
@@ -348,8 +423,8 @@ class SecurityMiddleware(BaseHTTPMiddleware):
     
     async def _process_fingerprint(self, request: Request) -> None:
         """Generate and store request fingerprint."""
-        ip_address = get_client_ip(request)
-        user_agent = get_user_agent(request)
+        ip_address = getattr(request.state, STATE_IP_ADDRESS, get_client_ip(request))
+        user_agent = getattr(request.state, STATE_USER_AGENT, get_user_agent(request))
         tenant_id = getattr(request.state, STATE_TENANT_ID, None) or \
                    request.headers.get("X-Tenant-ID", "unknown")
         
@@ -360,8 +435,6 @@ class SecurityMiddleware(BaseHTTPMiddleware):
         )
         
         request.state.fingerprint = fingerprint
-        request.state.ip_address = ip_address
-        request.state.user_agent = user_agent
 
 
 # =============================================================================
@@ -386,9 +459,15 @@ def setup_middleware(app: FastAPI) -> None:
 
 
 async def get_current_user(request: Request) -> dict[str, Any]:
-    """FastAPI dependency to get the current authenticated user."""
-    from fastapi import HTTPException
+    """
+    FastAPI dependency to get the current authenticated user.
     
+    Returns user context including:
+    - user_id: Clerk user ID
+    - org_id: Current organization ID (if any)
+    - auth_method: How the user authenticated
+    - claims: Full JWT claims (if JWT auth)
+    """
     user_id = getattr(request.state, STATE_USER_ID, None)
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
@@ -401,10 +480,22 @@ async def get_current_user(request: Request) -> dict[str, Any]:
     }
 
 
-async def get_current_org(request: Request) -> str:
-    """FastAPI dependency to get the current organization ID."""
-    from fastapi import HTTPException
+async def get_clerk_jwt(request: Request) -> str | None:
+    """
+    FastAPI dependency to get the raw Clerk JWT from the request.
     
+    This is used to create authenticated Supabase clients with RLS support.
+    Returns None for API key authentication (no JWT available).
+    """
+    return getattr(request.state, STATE_CLERK_JWT, None)
+
+
+async def get_current_org(request: Request) -> str:
+    """
+    FastAPI dependency to get the current organization ID.
+    
+    Checks JWT claims first, then falls back to X-Tenant-ID header.
+    """
     org_id = getattr(request.state, STATE_ORG_ID, None)
     if not org_id:
         tenant_id = getattr(request.state, STATE_TENANT_ID, None) or \
@@ -421,14 +512,54 @@ async def get_current_org(request: Request) -> str:
 
 
 async def get_request_context(request: Request) -> dict[str, Any]:
-    """FastAPI dependency to get full request context."""
+    """
+    FastAPI dependency to get full request context.
+    
+    Returns all authentication and security context for the request.
+    """
     return {
         "request_id": getattr(request.state, STATE_REQUEST_ID, None),
         "user_id": getattr(request.state, STATE_USER_ID, None),
         "org_id": getattr(request.state, STATE_ORG_ID, None),
         "tenant_id": getattr(request.state, STATE_TENANT_ID, None),
         "auth_method": getattr(request.state, STATE_AUTH_METHOD, None),
-        "fingerprint": getattr(request.state, "fingerprint", None),
-        "ip_address": getattr(request.state, "ip_address", None),
-        "user_agent": getattr(request.state, "user_agent", None),
+        "clerk_jwt": getattr(request.state, STATE_CLERK_JWT, None),
+        "fingerprint": getattr(request.state, STATE_FINGERPRINT, None),
+        "ip_address": getattr(request.state, STATE_IP_ADDRESS, None),
+        "user_agent": getattr(request.state, STATE_USER_AGENT, None),
     }
+
+
+# =============================================================================
+# AUTHENTICATED DATABASE SERVICE HELPER
+# =============================================================================
+
+
+def get_authenticated_db(request: Request):
+    """
+    FastAPI dependency to get an authenticated database service.
+    
+    Creates a database service with the Clerk JWT for RLS-enforced queries.
+    Falls back to service role for API key authentication.
+    
+    Usage:
+        @router.get("/my-data")
+        async def get_my_data(db: DatabaseService = Depends(get_authenticated_db)):
+            return await db.get_profile(db.user_id)
+    """
+    from app.services.database import (
+        get_db_service,
+        get_authenticated_db_service,
+        DatabaseService,
+    )
+    
+    clerk_jwt = getattr(request.state, STATE_CLERK_JWT, None)
+    user_id = getattr(request.state, STATE_USER_ID, None)
+    auth_method = getattr(request.state, STATE_AUTH_METHOD, None)
+    
+    # For JWT auth with valid token, use authenticated client with RLS
+    if auth_method == "jwt" and clerk_jwt and user_id and clerk_jwt != "dev_bypass_mock_jwt_token":
+        return get_authenticated_db_service(clerk_jwt, user_id)
+    
+    # For API key auth or dev bypass, use service role client
+    return get_db_service()
