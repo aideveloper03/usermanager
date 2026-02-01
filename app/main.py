@@ -179,27 +179,14 @@ Default rate limit: {rate_limit} requests per {period} seconds per tenant.
     )
     
     # Configure CORS
-    if settings.cors_origins_list:
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=settings.cors_origins_list,
-            allow_credentials=True,
-            allow_methods=["*"],
-            allow_headers=["*"],
-            expose_headers=[
-                "X-Request-ID",
-                "X-Execution-ID",
-                "X-RateLimit-Limit",
-                "X-RateLimit-Remaining",
-                "X-RateLimit-Reset",
-            ],
-        )
     
     # Setup authentication and security middleware
     setup_middleware(app)
     
     # Setup rate limiting
     setup_rate_limiting(app)
+    # Configure CORS
+    
     
     # Include API routes
     app.include_router(api_router, prefix="/api/v1")
@@ -249,7 +236,22 @@ Default rate limit: {rate_limit} requests per {period} seconds per tenant.
                 "request_id": request_id
             }
         )
-    
+    # Configure CORS
+    if settings.cors_origins_list:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=".*",
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=[
+                "X-Request-ID",
+                "X-Execution-ID",
+                "X-RateLimit-Limit",
+                "X-RateLimit-Remaining",
+                "X-RateLimit-Reset",
+            ],
+        )
     return app
 
 

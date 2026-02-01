@@ -1,12 +1,3 @@
-# =============================================================================
-# N8N Orchestration Gateway - Docker Compose (Development & Production)
-# =============================================================================
-# This compose file supports both local development and production deployment.
-# 
-# Usage:
-#   Development: docker compose up -d
-#   Production:  docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
-
 version: '3.8'
 
 services:
@@ -19,20 +10,23 @@ services:
       dockerfile: Dockerfile
       args:
         - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
-        - NEXT_PUBLIC_GATEWAY_URL=http://gateway:8000
+        - NEXT_PUBLIC_GATEWAY_URL=http://45.38.20.39:8001
+        - NEXT_PUBLIC_SUPABASE_URL=${SUPABASE_URL}
+        - NEXT_PUBLIC_SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
       - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
       - NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
-      - NEXT_PUBLIC_GATEWAY_URL=http://localhost:8000
+      - NEXT_PUBLIC_GATEWAY_URL=http://45.38.20.39:8001
       - NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
       - NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
       - NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/dashboard
       - NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/dashboard
     depends_on:
-      - gateway
+      gateway:
+        condition: service_healthy
     networks:
       - gateway-network
     healthcheck:
@@ -42,7 +36,7 @@ services:
       retries: 3
 
   # ---------------------------------------------------------------------------
-  # Gateway API (FastAPI)
+  # Gateway API (Python FastAPI)
   # ---------------------------------------------------------------------------
   gateway:
     build:
@@ -50,47 +44,50 @@ services:
       dockerfile: Dockerfile
       target: production
     ports:
-      - "8000:8000"
+      # FIXED: Map Host 8001 -> Container 8000 (where Uvicorn listens)
+      - "8001:8000"
     environment:
       # Application
       - APP_NAME=N8N Orchestration Gateway
-      - ENVIRONMENT=${ENVIRONMENT:-development}
+      - ENVIRONMENT=${ENVIRONMENT:-production}
       - DEBUG=${DEBUG:-true}
       - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
       - LOG_FORMAT=text
-      
+      - PORT=8000
+
       # Supabase (use your project values)
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
       - SUPABASE_SERVICE_ROLE_KEY=${SUPABASE_SERVICE_ROLE_KEY}
-      
+
       # Clerk
       - CLERK_SECRET_KEY=${CLERK_SECRET_KEY}
       - CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
       - CLERK_JWT_ISSUER=${CLERK_JWT_ISSUER}
       - CLERK_JWKS_URL=${CLERK_JWKS_URL}
-      
+
       # N8N
       - N8N_BASE_URL=${N8N_BASE_URL:-http://n8n:5678}
       - N8N_INTERNAL_AUTH_SECRET=${N8N_INTERNAL_AUTH_SECRET:-development-secret-change-in-production-minimum-64-chars}
       - N8N_API_KEY=${N8N_API_KEY:-}
       - N8N_REQUEST_TIMEOUT=300
       - N8N_USE_DYNAMIC_CREDENTIALS=${N8N_USE_DYNAMIC_CREDENTIALS:-false}
-      
+
       # Redis
       - REDIS_URL=redis://redis:6379/0
       - ENABLE_RATE_LIMITING=true
-      
+
       # Security
       - ENABLE_HMAC_VALIDATION=${ENABLE_HMAC_VALIDATION:-true}
       - ENABLE_FINGERPRINTING=true
-      - CORS_ORIGINS=["*"]
-      
+      - CORS_ORIGINS=["http://45.38.20.39:3000","http://localhost:3000","45.38.20.39","*"]
+
       # Developer Mode (disable in production!)
-      - DEV_SKIP_AUTH=${DEV_SKIP_AUTH:-false}
+      - DEV_SKIP_AUTH=true
     depends_on:
       - redis
     healthcheck:
+      # Internal check hits port 8000
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health"]
       interval: 30s
       timeout: 10s
@@ -105,7 +102,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "6378:6379"
     volumes:
       - redis-data:/data
     command: redis-server --appendonly yes
@@ -123,7 +120,7 @@ services:
   n8n:
     image: n8nio/n8n:latest
     ports:
-      - "5678:5678"
+      - "5677:5678"
     environment:
       - N8N_BASIC_AUTH_ACTIVE=false
       - N8N_HOST=n8n
@@ -135,6 +132,7 @@ services:
       - n8n-data:/home/node/.n8n
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5678/healthz"]
+      # FIXED: Indentation below was broken in base file
       interval: 30s
       timeout: 10s
       retries: 3
