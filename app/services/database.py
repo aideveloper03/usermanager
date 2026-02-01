@@ -77,7 +77,7 @@ class SupabaseClientFactory:
         if self._service_client is None:
             options = ClientOptions(
                 postgrest_client_timeout=30,
-                storage_client_timeout=30,
+                storage_client_timeout=20,
             )
             self._service_client = create_client(
                 self.supabase_url,
@@ -104,10 +104,10 @@ class SupabaseClientFactory:
             Supabase Client with user authentication
         """
         # Create a new client with the anon key as the apikey
-        # The Clerk JWT is passed as the Authorization bearer token
+        # The Clerk JWT is passed as the Authorization bearer token via headers
         options = ClientOptions(
             postgrest_client_timeout=30,
-            storage_client_timeout=30,
+            storage_client_timeout=20,
             headers={
                 "Authorization": f"Bearer {clerk_jwt}",
             }
