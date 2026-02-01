@@ -1,12 +1,26 @@
 """
-Database service for Supabase operations.
+Database service for Supabase operations with Clerk Native Integration.
 
-This module provides database operations using supabase-py,
-following the principle of least privilege with RLS policies.
+This module provides database operations using supabase-py with proper
+Row-Level Security (RLS) support through Clerk JWT token authentication.
+
+Architecture:
+    - ServiceRoleClient: For admin/background operations (bypasses RLS)
+    - AuthenticatedClient: Per-request client with Clerk JWT for RLS enforcement
+
+The Clerk JWT is passed to Supabase which validates it against Clerk's JWKS.
+RLS policies use auth.jwt()->>'sub' to extract the Clerk user ID.
+
+Setup Requirements:
+    1. Configure Clerk as a third-party auth provider in Supabase Dashboard
+    2. Add Clerk's JWKS URL to Supabase auth configuration
+    3. RLS policies should use auth.jwt()->>'sub' for user identification
 """
 
 from typing import Any
 from uuid import UUID
+from contextlib import contextmanager
+from functools import lru_cache
 
 import structlog
 from supabase import create_client, Client
@@ -19,33 +33,149 @@ from app.models.schemas import ExecutionStatus
 logger = structlog.get_logger(__name__)
 
 
+# =============================================================================
+# SUPABASE CLIENT FACTORY
+# =============================================================================
+
+
+class SupabaseClientFactory:
+    """
+    Factory for creating Supabase clients with different auth contexts.
+    
+    Supports two modes:
+    1. Service Role: Full admin access, bypasses RLS
+    2. Authenticated: Per-request client with Clerk JWT for RLS enforcement
+    
+    The Clerk JWT is passed in the Authorization header. Supabase validates
+    the JWT against Clerk's JWKS and extracts claims for RLS policies.
+    """
+    
+    def __init__(self, supabase_url: str, anon_key: str, service_role_key: str):
+        """
+        Initialize the client factory.
+        
+        Args:
+            supabase_url: Supabase project URL
+            anon_key: Supabase anon/public key (used with JWT for RLS)
+            service_role_key: Supabase service role key (admin access)
+        """
+        self.supabase_url = supabase_url
+        self.anon_key = anon_key
+        self.service_role_key = service_role_key
+        self._service_client: Client | None = None
+    
+    def get_service_client(self) -> Client:
+        """
+        Get a Supabase client with service role privileges.
+        
+        This client bypasses RLS and has full database access.
+        Use for admin operations, webhooks, and background jobs.
+        
+        Returns:
+            Supabase Client with service role key
+        """
+        if self._service_client is None:
+            options = ClientOptions(
+                postgrest_client_timeout=30,
+                storage_client_timeout=20,
+            )
+            self._service_client = create_client(
+                self.supabase_url,
+                self.service_role_key,
+                options=options
+            )
+            logger.debug("service_role_client_created")
+        return self._service_client
+    
+    def get_authenticated_client(self, clerk_jwt: str) -> Client:
+        """
+        Create a Supabase client authenticated with a Clerk JWT.
+        
+        This client respects RLS policies. The JWT is validated by Supabase
+        against Clerk's JWKS, and auth.jwt() claims are available in RLS.
+        
+        IMPORTANT: This creates a new client per request. The Clerk JWT is
+        passed via custom headers that Supabase's PostgREST understands.
+        
+        Args:
+            clerk_jwt: The Clerk session token (JWT)
+            
+        Returns:
+            Supabase Client with user authentication
+        """
+        # Create a new client with the anon key as the apikey
+        # The Clerk JWT is passed as the Authorization bearer token via headers
+        options = ClientOptions(
+            postgrest_client_timeout=30,
+            storage_client_timeout=20,
+            headers={
+                "Authorization": f"Bearer {clerk_jwt}",
+            }
+        )
+        
+        client = create_client(
+            self.supabase_url,
+            self.anon_key,  # Use anon key - RLS will be enforced
+            options=options
+        )
+        
+        logger.debug("authenticated_client_created")
+        return client
+
+
+# Global factory instance
+_client_factory: SupabaseClientFactory | None = None
+
+
+def get_client_factory() -> SupabaseClientFactory:
+    """Get the Supabase client factory singleton."""
+    global _client_factory
+    if _client_factory is None:
+        _client_factory = SupabaseClientFactory(
+            supabase_url=settings.supabase_url,
+            anon_key=settings.supabase_anon_key,
+            service_role_key=settings.supabase_service_role_key
+        )
+    return _client_factory
+
+
+# =============================================================================
+# DATABASE SERVICE BASE CLASS
+# =============================================================================
+
+
 class DatabaseService:
     """
     Database service for Supabase operations.
     
-    Handles all database interactions with proper error handling and logging.
-    Uses service role authentication for administrative operations.
+    This is the base class providing database operations.
+    It can be initialized with either a service role client
+    or an authenticated client with Clerk JWT.
+    
+    For RLS-protected operations, use AuthenticatedDatabaseService.
+    For admin operations, use get_db_service() which returns a service role client.
     """
     
-    def __init__(self, supabase_url: str, supabase_key: str):
-        self.supabase_url = supabase_url
-        self.supabase_key = supabase_key
-        self._client: Client | None = None
+    def __init__(self, client: Client, user_id: str | None = None):
+        """
+        Initialize the database service.
+        
+        Args:
+            client: Supabase client instance
+            user_id: Optional Clerk user ID (for logging/context)
+        """
+        self._client = client
+        self._user_id = user_id
     
     @property
     def client(self) -> Client:
-        """Get or create Supabase client."""
-        if self._client is None:
-            options = ClientOptions(
-                postgrest_client_timeout=30,
-                storage_client_timeout=30,
-            )
-            self._client = create_client(
-                self.supabase_url,
-                self.supabase_key,
-                options=options
-            )
+        """Get the Supabase client."""
         return self._client
+    
+    @property
+    def user_id(self) -> str | None:
+        """Get the authenticated user ID (if available)."""
+        return self._user_id
     
     # =========================================================================
     # PROFILE OPERATIONS
@@ -563,6 +693,50 @@ class DatabaseService:
 
 
 # =============================================================================
+# AUTHENTICATED DATABASE SERVICE
+# =============================================================================
+
+
+class AuthenticatedDatabaseService(DatabaseService):
+    """
+    Database service with Clerk JWT authentication for RLS enforcement.
+    
+    This service should be used for user-scoped operations where RLS
+    policies need to be enforced based on the authenticated user.
+    
+    The Clerk JWT is passed to Supabase, which validates it and makes
+    the claims available in RLS policies via auth.jwt().
+    
+    Example RLS policy:
+        CREATE POLICY "users_own_data" ON profiles
+            FOR SELECT USING (id = (auth.jwt()->>'sub'));
+    """
+    
+    def __init__(self, clerk_jwt: str, user_id: str):
+        """
+        Initialize authenticated database service.
+        
+        Args:
+            clerk_jwt: The Clerk session JWT token
+            user_id: The Clerk user ID (extracted from JWT 'sub' claim)
+        """
+        factory = get_client_factory()
+        client = factory.get_authenticated_client(clerk_jwt)
+        super().__init__(client, user_id)
+        self._clerk_jwt = clerk_jwt
+        
+        logger.debug(
+            "authenticated_db_service_created",
+            user_id=user_id
+        )
+    
+    @property
+    def clerk_jwt(self) -> str:
+        """Get the Clerk JWT token."""
+        return self._clerk_jwt
+
+
+# =============================================================================
 # DEPENDENCY INJECTION
 # =============================================================================
 
@@ -570,17 +744,52 @@ _db_service: DatabaseService | None = None
 
 
 def get_db_service() -> DatabaseService:
-    """Get the database service singleton."""
+    """
+    Get the database service singleton with SERVICE ROLE privileges.
+    
+    This client bypasses RLS and should only be used for:
+    - Webhook handlers
+    - Background jobs
+    - Admin operations
+    - API key authentication (where no user JWT is available)
+    
+    For user-scoped operations, use get_authenticated_db_service() instead.
+    """
     global _db_service
     if _db_service is None:
-        _db_service = DatabaseService(
-            supabase_url=settings.supabase_url,
-            supabase_key=settings.supabase_service_role_key
-        )
+        factory = get_client_factory()
+        _db_service = DatabaseService(factory.get_service_client())
     return _db_service
+
+
+def get_authenticated_db_service(clerk_jwt: str, user_id: str) -> AuthenticatedDatabaseService:
+    """
+    Create an authenticated database service for a specific request.
+    
+    This creates a new Supabase client with the Clerk JWT, enabling
+    RLS policies to enforce data access based on the authenticated user.
+    
+    Args:
+        clerk_jwt: The Clerk session JWT token from the request
+        user_id: The Clerk user ID (sub claim from JWT)
+    
+    Returns:
+        AuthenticatedDatabaseService with user context for RLS
+    
+    Example usage in FastAPI:
+        @router.get("/my-profile")
+        async def get_my_profile(request: Request):
+            jwt = getattr(request.state, "clerk_jwt", None)
+            user_id = getattr(request.state, "user_id", None)
+            if jwt and user_id:
+                db = get_authenticated_db_service(jwt, user_id)
+                return await db.get_profile(user_id)
+    """
+    return AuthenticatedDatabaseService(clerk_jwt, user_id)
 
 
 def reset_db_service() -> None:
     """Reset the database service singleton. Useful for testing."""
-    global _db_service
+    global _db_service, _client_factory
     _db_service = None
+    _client_factory = None

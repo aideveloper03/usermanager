@@ -2,11 +2,17 @@
 Security utilities for the N8N Orchestration Gateway.
 
 This module provides:
-- Clerk JWT verification using JWKS (simple approach)
+- Clerk JWT verification using JWKS for native Supabase integration
 - HMAC signature validation for anti-hijacking
 - Input sanitization
 - Request fingerprinting
 - API key management
+
+Security Architecture:
+    - Clerk JWTs are validated locally using Clerk's JWKS
+    - The same JWT is passed to Supabase for RLS enforcement
+    - Supabase validates the JWT independently via its third-party auth config
+    - This provides defense-in-depth: both Python and Supabase verify the token
 """
 
 import hashlib
